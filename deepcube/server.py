@@ -35,7 +35,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from deepcube.cube3 import MOVES, N_MOVES, N_STICKERS, apply_move, scramble
+from deepcube.cube3 import MOVE_PERMS, MOVES, N_MOVES, N_STICKERS, SOLVED, apply_move, scramble
 from deepcube.model import DeepCubeANet, load_checkpoint
 from deepcube.search import bwas_solve
 
@@ -90,6 +90,15 @@ class HealthResponse(BaseModel):
     checkpoint_path: str | None
 
 
+class MetaResponse(BaseModel):
+    """Enough env info for the frontend to avoid duplicating cube3.py in JS."""
+    n_stickers: int
+    n_moves: int
+    moves: list[str]
+    move_perms: list[list[int]]
+    solved_state: list[int]
+
+
 # ---------------------------------------------------------------------------
 # Model lifecycle
 # ---------------------------------------------------------------------------
@@ -131,6 +140,17 @@ app = FastAPI(title="DeepCubeA", version="0.1.0", lifespan=_lifespan)
 def healthz() -> HealthResponse:
     path = os.getenv("DEEPCUBE_CHECKPOINT", str(_DEFAULT_CKPT))
     return HealthResponse(ok=True, model_loaded=_net is not None, checkpoint_path=path)
+
+
+@app.get("/meta", response_model=MetaResponse)
+def meta() -> MetaResponse:
+    return MetaResponse(
+        n_stickers=N_STICKERS,
+        n_moves=N_MOVES,
+        moves=MOVES,
+        move_perms=MOVE_PERMS.tolist(),
+        solved_state=SOLVED.tolist(),
+    )
 
 
 @app.post("/scramble", response_model=ScrambleResponse)

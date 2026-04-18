@@ -38,6 +38,21 @@ def client_no_net(monkeypatch: pytest.MonkeyPatch) -> TestClient:
     return TestClient(server.app)
 
 
+def test_meta_shape(client: TestClient):
+    r = client.get("/meta")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["n_stickers"] == 54
+    assert body["n_moves"] == 12
+    assert len(body["moves"]) == 12
+    assert len(body["move_perms"]) == 12
+    assert all(len(p) == 54 for p in body["move_perms"])
+    assert len(body["solved_state"]) == 54
+    # Each perm is a bijection on 0..53
+    for p in body["move_perms"]:
+        assert sorted(p) == list(range(54))
+
+
 def test_healthz_shape(client: TestClient):
     r = client.get("/healthz")
     assert r.status_code == 200

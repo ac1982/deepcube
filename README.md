@@ -76,41 +76,72 @@ The notebook writes `ckpt_latest.pt` every `ckpt_every` iterations and plots an 
 
 RTX 5090 is Blackwell and requires PyTorch **2.7+**. If you hit `no kernel image available for sm_120`, cell 2 will print the fallback install command (PyTorch nightly + cu128).
 
-## Inference + UI (coming)
+## Inference + UI
 
-Planned (not yet implemented):
+Local stack: uv-managed Python package + FastAPI backend + three.js 3D frontend.
 
-```
-deepcube/
-├── cube3.py       # same env as the notebook, promoted to a module
-├── model.py       # same architecture as the notebook
-├── search.py      # Batch-Weighted A* solver
-└── server.py      # FastAPI: POST /scramble, POST /solve
-static/
-└── index.html     # cuber.js 3D cube, drives the backend
-checkpoints/
-└── deepcube_cube3.pt   # drop the trained file here
+### First time
+
+```bash
+uv sync              # install deps
+uv run pytest        # 80 tests, should all pass
 ```
 
-Run locally with `uv run uvicorn deepcube.server:app` → open `http://127.0.0.1:8000`.
+### Run the server
+
+```bash
+uv run deepcube-serve
+# or, custom host/port:
+DEEPCUBE_HOST=0.0.0.0 DEEPCUBE_PORT=8000 uv run deepcube-serve
+```
+
+Open `http://127.0.0.1:8000` — the 3D cube loads, **Scramble** animates a random
+move sequence, **Solve** sends the current state to the server and animates the
+returned solution.
+
+### Dropping in a trained checkpoint
+
+Copy the `.pt` file downloaded from Vast.ai to `checkpoints/deepcube_cube3.pt`
+(or point `DEEPCUBE_CHECKPOINT` elsewhere) and restart the server. Without a
+checkpoint the server still boots — only `/solve` is disabled.
+
+### HTTP API
+
+| endpoint | method | description |
+|---|---|---|
+| `/` | GET | the 3D frontend |
+| `/healthz` | GET | `{ok, model_loaded, checkpoint_path}` |
+| `/meta` | GET | cube constants (moves, MOVE_PERMS, solved state) used by the frontend |
+| `/scramble` | POST | `{depth, seed?}` → `{state, moves}` |
+| `/solve` | POST | `{state, lambda_weight?, batch_size?, ...}` → `{solved, moves, path_length, nodes_expanded, nodes_generated, elapsed_sec, stop_reason}` |
 
 ## Project status
 
 - [x] Cube environment with verified moves (sanity tests pass)
 - [x] PyTorch model (14.66 M params)
-- [x] AVI training loop with AMP, `torch.compile`, checkpointing, resume
+- [x] AVI training loop with AMP (bf16), `torch.compile`, checkpointing, resume
 - [x] Greedy-rollout sanity check
-- [ ] Batch-Weighted A\* solver
-- [ ] FastAPI backend
-- [ ] cuber.js 3D frontend
+- [x] Batch-Weighted A\* solver (`deepcube/search.py`, 19 tests)
+- [x] FastAPI backend (`deepcube/server.py`, 13 tests)
+- [x] three.js 3D frontend (`static/index.html`)
 
 ## Repo layout
 
 ```
 .
 ├── README.md
-├── train.ipynb           # upload this to Vast.ai
-├── build_notebook.py     # regenerate train.ipynb from source
+├── train.ipynb             # upload this to Vast.ai
+├── build_notebook.py       # regenerate train.ipynb from source
+├── pyproject.toml          # uv-managed Python 3.12 package
+├── deepcube/
+│   ├── cube3.py            # env: 54-sticker state, 12 moves, scramble, one-hot
+│   ├── model.py            # DeepCubeANet, load_checkpoint
+│   ├── search.py           # Batch-Weighted A*
+│   └── server.py           # FastAPI: /healthz, /meta, /scramble, /solve
+├── static/
+│   └── index.html          # three.js 3D frontend
+├── tests/                  # pytest suite (80 cases)
+├── checkpoints/            # drop deepcube_cube3.pt here
 └── .gitignore
 ```
 

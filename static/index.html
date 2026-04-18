@@ -1,0 +1,395 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>DeepCubeA — 3×3 solver</title>
+<style>
+  :root {
+    --bg: #0f1115;
+    --panel: #171a21;
+    --border: #2a2f3a;
+    --text: #dfe3ec;
+    --muted: #8a93a4;
+    --accent: #5eaeff;
+    --good: #5ed987;
+    --warn: #e0a94b;
+    --bad: #e85d5d;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; height: 100%; background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+  #app { display: flex; height: 100vh; }
+  #canvas-wrap { flex: 1; position: relative; }
+  #canvas-wrap canvas { display: block; width: 100%; height: 100%; }
+  aside#sidebar {
+    width: 340px; padding: 20px; border-left: 1px solid var(--border); background: var(--panel);
+    display: flex; flex-direction: column; gap: 18px; overflow-y: auto;
+  }
+  h1 { margin: 0 0 4px; font-size: 18px; font-weight: 600; }
+  .sub { color: var(--muted); font-size: 12px; margin-bottom: 8px; }
+  section { border: 1px solid var(--border); border-radius: 8px; padding: 14px; background: #1a1e27; }
+  section h2 { margin: 0 0 10px; font-size: 13px; text-transform: uppercase; color: var(--muted); letter-spacing: 0.06em; }
+  label { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; font-size: 13px; }
+  input[type=range] { flex: 1; accent-color: var(--accent); }
+  input[type=number] { width: 60px; background: #0f1218; color: var(--text); border: 1px solid var(--border); border-radius: 4px; padding: 4px 8px; font-size: 13px; }
+  button {
+    width: 100%; padding: 9px 12px; background: var(--accent); color: #0a1220; border: 0; border-radius: 6px;
+    font-size: 14px; font-weight: 600; cursor: pointer; transition: filter .15s; margin-top: 4px;
+  }
+  button:hover:not(:disabled) { filter: brightness(1.1); }
+  button:disabled { background: #2a2f3a; color: var(--muted); cursor: not-allowed; }
+  button.secondary { background: transparent; border: 1px solid var(--border); color: var(--text); }
+  .stats { font-size: 12px; color: var(--muted); line-height: 1.7; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .stats b { color: var(--text); font-weight: 500; }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 11px; font-weight: 600; }
+  .badge.good { background: rgba(94,217,135,0.15); color: var(--good); }
+  .badge.warn { background: rgba(224,169,75,0.15); color: var(--warn); }
+  .badge.bad { background: rgba(232,93,93,0.15); color: var(--bad); }
+  .moves { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; color: var(--muted); line-height: 1.6; word-break: break-word; margin-top: 8px; }
+  .row { display: flex; gap: 8px; align-items: center; }
+  .row > button { margin-top: 0; }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="canvas-wrap"></div>
+  <aside id="sidebar">
+    <div>
+      <h1>DeepCubeA</h1>
+      <div class="sub">PyTorch reimplementation · 3×3 Rubik's cube</div>
+      <div id="health" class="badge warn">checking…</div>
+    </div>
+
+    <section>
+      <h2>Scramble</h2>
+      <label>
+        <span style="width: 60px;">depth</span>
+        <input type="range" id="depth" min="1" max="30" value="15" />
+        <input type="number" id="depthNum" min="1" max="30" value="15" />
+      </label>
+      <button id="scrambleBtn">Scramble</button>
+    </section>
+
+    <section>
+      <h2>Solve</h2>
+      <label>
+        <span style="width: 60px;">λ</span>
+        <input type="range" id="lambda" min="1" max="5" step="0.5" value="2" />
+        <span id="lambdaVal" style="font-family: ui-monospace, monospace; font-size: 12px;">2.0</span>
+      </label>
+      <div class="row">
+        <button id="solveBtn">Solve</button>
+        <button id="resetBtn" class="secondary">Reset</button>
+      </div>
+      <div id="solveStats" class="stats" style="margin-top: 10px;"></div>
+      <div id="solveMoves" class="moves"></div>
+    </section>
+
+    <section>
+      <h2>How it works</h2>
+      <div class="stats">
+        <b>Scramble</b> asks the server for a random sequence of moves and
+        animates them on the cube.<br><br>
+        <b>Solve</b> sends the current 54-sticker state to the server, which
+        runs <b>Batch-Weighted A\*</b> with the trained neural heuristic to
+        find a move sequence back to solved. <b>λ</b> trades optimality for
+        speed (1 = optimal A*, higher = greedier).
+      </div>
+    </section>
+  </aside>
+</div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://unpkg.com/three@0.169.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.169.0/examples/jsm/"
+  }
+}
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+// ---- standard Western Rubik's color scheme ----
+const COLORS = {
+  0: 0xf5f5f5, // U white
+  1: 0x2ecc40, // F green
+  2: 0xff4136, // R red
+  3: 0x0074d9, // B blue
+  4: 0xff851b, // L orange
+  5: 0xffdc00, // D yellow
+  interior: 0x0a0b0e,
+};
+
+const CUBIE_SIZE = 0.92;
+const CUBIE_SPACING = 1.0;
+const EPS = 1e-2;
+const PI_2 = Math.PI / 2;
+
+// (axis index 0=x/1=y/2=z, layer value in {-1,0,1}, rotation angle in radians)
+const MOVE_META = {
+  "U":  [1, +1, -PI_2],  "U'": [1, +1, +PI_2],
+  "D":  [1, -1, +PI_2],  "D'": [1, -1, -PI_2],
+  "F":  [2, +1, -PI_2],  "F'": [2, +1, +PI_2],
+  "B":  [2, -1, +PI_2],  "B'": [2, -1, -PI_2],
+  "R":  [0, +1, -PI_2],  "R'": [0, +1, +PI_2],
+  "L":  [0, -1, +PI_2],  "L'": [0, -1, -PI_2],
+};
+const AXIS_VECS = [new THREE.Vector3(1,0,0), new THREE.Vector3(0,1,0), new THREE.Vector3(0,0,1)];
+
+// Sticker color for a given cubie-face at solved state. Each cubie keeps its
+// 6 face colors forever; moves physically rotate the cubies, so colors
+// follow their cubies automatically — we never repaint.
+function solvedFaceColor(cx, cy, cz, axis, sign) {
+  const onFace = (axis === 0 && cx === sign) || (axis === 1 && cy === sign) || (axis === 2 && cz === sign);
+  if (!onFace) return COLORS.interior;
+  if (axis === 1) return sign > 0 ? COLORS[0] : COLORS[5];  // U / D
+  if (axis === 2) return sign > 0 ? COLORS[1] : COLORS[3];  // F / B
+  return sign > 0 ? COLORS[2] : COLORS[4];                  // R / L
+}
+
+function makeCubie(cx, cy, cz) {
+  const g = new THREE.BoxGeometry(CUBIE_SIZE, CUBIE_SIZE, CUBIE_SIZE);
+  // BoxGeometry face order: +x, -x, +y, -y, +z, -z
+  const mats = [
+    new THREE.MeshLambertMaterial({ color: solvedFaceColor(cx,cy,cz, 0,+1) }),
+    new THREE.MeshLambertMaterial({ color: solvedFaceColor(cx,cy,cz, 0,-1) }),
+    new THREE.MeshLambertMaterial({ color: solvedFaceColor(cx,cy,cz, 1,+1) }),
+    new THREE.MeshLambertMaterial({ color: solvedFaceColor(cx,cy,cz, 1,-1) }),
+    new THREE.MeshLambertMaterial({ color: solvedFaceColor(cx,cy,cz, 2,+1) }),
+    new THREE.MeshLambertMaterial({ color: solvedFaceColor(cx,cy,cz, 2,-1) }),
+  ];
+  const m = new THREE.Mesh(g, mats);
+  m.position.set(cx * CUBIE_SPACING, cy * CUBIE_SPACING, cz * CUBIE_SPACING);
+  return m;
+}
+
+// ---- scene setup ----
+const wrap = document.getElementById('canvas-wrap');
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x0b0d12);
+const camera = new THREE.PerspectiveCamera(45, 1, 0.1, 100);
+camera.position.set(5, 4, 6);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+wrap.appendChild(renderer.domElement);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+
+scene.add(new THREE.AmbientLight(0xffffff, 0.6));
+const key = new THREE.DirectionalLight(0xffffff, 0.8); key.position.set(5, 8, 6); scene.add(key);
+const fill = new THREE.DirectionalLight(0xffffff, 0.3); fill.position.set(-6, -4, -3); scene.add(fill);
+
+const cubeGroup = new THREE.Group();
+scene.add(cubeGroup);
+const cubies = [];
+for (let x = -1; x <= 1; x++)
+  for (let y = -1; y <= 1; y++)
+    for (let z = -1; z <= 1; z++)
+      if (!(x === 0 && y === 0 && z === 0)) {
+        const c = makeCubie(x, y, z);
+        cubeGroup.add(c);
+        cubies.push(c);
+      }
+
+function resize() {
+  const w = wrap.clientWidth, h = wrap.clientHeight;
+  renderer.setSize(w, h, false);
+  renderer.setPixelRatio(window.devicePixelRatio);
+  camera.aspect = w / h;
+  camera.updateProjectionMatrix();
+}
+resize();
+new ResizeObserver(resize).observe(wrap);
+
+function render() {
+  requestAnimationFrame(render);
+  controls.update();
+  renderer.render(scene, camera);
+}
+render();
+
+// ---- move animation ----
+let busy = false;
+
+function animateRotation(pivot, axisVec, targetAngle, duration) {
+  return new Promise(resolve => {
+    const t0 = performance.now();
+    function step() {
+      const elapsed = performance.now() - t0;
+      const t = Math.min(1, elapsed / duration);
+      const ease = 0.5 - 0.5 * Math.cos(t * Math.PI);
+      pivot.quaternion.setFromAxisAngle(axisVec, targetAngle * ease);
+      if (t < 1) requestAnimationFrame(step);
+      else resolve();
+    }
+    step();
+  });
+}
+
+async function animateMove(moveName, durationMs = 180) {
+  const meta = MOVE_META[moveName];
+  if (!meta) throw new Error(`unknown move: ${moveName}`);
+  const [axis, layer, angle] = meta;
+  const axisVec = AXIS_VECS[axis];
+
+  const inLayer = cubies.filter(c => {
+    const wp = new THREE.Vector3();
+    c.getWorldPosition(wp);
+    return Math.abs(wp.getComponent(axis) - layer * CUBIE_SPACING) < EPS;
+  });
+
+  const pivot = new THREE.Group();
+  cubeGroup.add(pivot);
+  for (const c of inLayer) pivot.attach(c);
+
+  await animateRotation(pivot, axisVec, angle, durationMs);
+
+  // Reparent back, preserving world transforms. The cubies' orientations
+  // now carry the 90-degree rotation — we never snap or repaint.
+  for (const c of [...pivot.children]) cubeGroup.attach(c);
+  cubeGroup.remove(pivot);
+}
+
+async function animateSequence(moves, duration = 180) {
+  for (const m of moves) await animateMove(m, duration);
+}
+
+// ---- client-side state (one-hot encoded via colors is in the cubies, but we
+// track a 54-array to send to /solve) ----
+let state = null;
+let movePerms = null;  // (12, 54) int array
+let moveNames = null;  // ["U", "U'", ...]
+let moveNameToIdx = {};
+let solvedState = null;
+
+function applyPerm(s, perm) {
+  const out = new Int8Array(54);
+  for (let i = 0; i < 54; i++) out[i] = s[perm[i]];
+  return out;
+}
+function statesEqual(a, b) {
+  for (let i = 0; i < 54; i++) if (a[i] !== b[i]) return false;
+  return true;
+}
+
+// ---- DOM wiring ----
+const $ = (id) => document.getElementById(id);
+
+// depth slider + number box sync
+const depthSlider = $('depth'), depthNum = $('depthNum');
+depthSlider.oninput = () => depthNum.value = depthSlider.value;
+depthNum.oninput = () => depthSlider.value = depthNum.value;
+
+const lambdaSlider = $('lambda'), lambdaVal = $('lambdaVal');
+lambdaSlider.oninput = () => lambdaVal.textContent = parseFloat(lambdaSlider.value).toFixed(1);
+
+function setBusy(b) {
+  busy = b;
+  for (const id of ['scrambleBtn', 'solveBtn', 'resetBtn']) $(id).disabled = b;
+}
+function setStats(html) { $('solveStats').innerHTML = html; }
+function setMoves(html) { $('solveMoves').innerHTML = html; }
+
+async function refreshHealth() {
+  try {
+    const r = await fetch('/healthz').then(r => r.json());
+    const el = $('health');
+    if (r.model_loaded) {
+      el.className = 'badge good'; el.textContent = 'model loaded';
+    } else {
+      el.className = 'badge warn'; el.textContent = 'no model — solve disabled';
+      $('solveBtn').disabled = true;
+    }
+  } catch (e) {
+    const el = $('health'); el.className = 'badge bad'; el.textContent = 'server unreachable';
+  }
+}
+
+async function bootstrap() {
+  const meta = await fetch('/meta').then(r => r.json());
+  movePerms = meta.move_perms.map(p => new Int32Array(p));
+  moveNames = meta.moves;
+  moveNameToIdx = Object.fromEntries(moveNames.map((n, i) => [n, i]));
+  solvedState = new Int8Array(meta.solved_state);
+  state = new Int8Array(solvedState);
+  await refreshHealth();
+}
+
+$('scrambleBtn').onclick = async () => {
+  if (busy) return;
+  setBusy(true); setStats(''); setMoves('');
+  try {
+    const depth = parseInt(depthSlider.value, 10);
+    const resp = await fetch('/scramble', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ depth })
+    }).then(r => r.json());
+    await animateSequence(resp.moves, 120);
+    // Sync client state from server (we trust the server's state).
+    state = new Int8Array(resp.state);
+    setMoves(`<b>scrambled ${resp.moves.length} moves:</b><br>${resp.moves.join(' ')}`);
+  } catch (e) {
+    setStats(`<span style="color: var(--bad)">scramble failed: ${e.message}</span>`);
+  } finally { setBusy(false); }
+};
+
+$('solveBtn').onclick = async () => {
+  if (busy) return;
+  setBusy(true); setStats('solving…'); setMoves('');
+  try {
+    const body = { state: Array.from(state), lambda_weight: parseFloat(lambdaSlider.value) };
+    const resp = await fetch('/solve', {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body),
+    });
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({}));
+      throw new Error(err.detail || `HTTP ${resp.status}`);
+    }
+    const r = await resp.json();
+    if (r.solved) {
+      await animateSequence(r.moves, 160);
+      for (const m of r.moves) state = applyPerm(state, movePerms[moveNameToIdx[m]]);
+      setStats(
+        `<b>solved</b> in ${r.path_length} moves · ${r.nodes_expanded.toLocaleString()} expanded · ` +
+        `${r.nodes_generated.toLocaleString()} generated · ${r.elapsed_sec.toFixed(2)}s`
+      );
+      setMoves(r.moves.join(' '));
+    } else {
+      setStats(`<span style="color: var(--warn)">stopped: ${r.stop_reason} after ` +
+               `${r.nodes_expanded.toLocaleString()} expanded · ${r.elapsed_sec.toFixed(2)}s</span>`);
+    }
+  } catch (e) {
+    setStats(`<span style="color: var(--bad)">solve failed: ${e.message}</span>`);
+  } finally { setBusy(false); }
+};
+
+$('resetBtn').onclick = async () => {
+  if (busy) return;
+  // Rebuild cubies from scratch — simplest way to return to solved orientation.
+  setBusy(true);
+  for (const c of cubies) {
+    cubeGroup.remove(c);
+    c.geometry.dispose();
+    for (const m of c.material) m.dispose();
+  }
+  cubies.length = 0;
+  for (let x = -1; x <= 1; x++)
+    for (let y = -1; y <= 1; y++)
+      for (let z = -1; z <= 1; z++)
+        if (!(x === 0 && y === 0 && z === 0)) {
+          const c = makeCubie(x, y, z);
+          cubeGroup.add(c); cubies.push(c);
+        }
+  state = new Int8Array(solvedState);
+  setStats(''); setMoves('');
+  setBusy(false);
+};
+
+bootstrap().catch(e => {
+  const el = $('health'); el.className = 'badge bad'; el.textContent = 'bootstrap failed';
+  console.error(e);
+});
+</script>
+</body>
+</html>
