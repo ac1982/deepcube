@@ -48,27 +48,42 @@ md("""## 1. Setup & GPU check
 Verifies CUDA, checks that Blackwell kernels work. If the smoke matmul fails on a 5090 with a "no kernel image" error, install PyTorch nightly (cell will print the command).
 """)
 
-code("""import subprocess, sys
-subprocess.run(["nvidia-smi", "-L"], check=False)
+code("""import subprocess, shutil, sys
+
+# `nvidia-smi` is only present on hosts with an NVIDIA driver installed.
+# On Colab with the default CPU runtime it's missing — treat that as a
+# clear signal that the user needs to switch runtimes.
+if shutil.which("nvidia-smi"):
+    subprocess.run(["nvidia-smi", "-L"], check=False)
+else:
+    print("[setup] nvidia-smi not found on PATH — no NVIDIA driver on this host.")
 
 import torch, numpy as np
 print(f"torch={torch.__version__}  numpy={np.__version__}  cuda_available={torch.cuda.is_available()}")
-if torch.cuda.is_available():
-    print(f"device: {torch.cuda.get_device_name(0)}  cc={torch.cuda.get_device_capability(0)}")
-    try:
-        x = torch.randn(2048, 2048, device="cuda")
-        y = x @ x
-        torch.cuda.synchronize()
-        print(f"gpu matmul OK  (sum={y.sum().item():.2f})")
-    except Exception as e:
-        print("gpu matmul FAILED:", e)
-        print("If you see 'no kernel image available for sm_120', run:")
-        print("  !pip install --upgrade --pre torch --index-url https://download.pytorch.org/whl/nightly/cu128")
-        raise
-else:
-    raise RuntimeError("No CUDA device — this notebook is GPU-only.")
+if not torch.cuda.is_available():
+    raise RuntimeError(
+        "No CUDA device available. This notebook trains a neural net and is GPU-only.\\n"
+        "\\n"
+        "  On Colab:    Runtime -> Change runtime type -> Hardware accelerator -> T4 GPU\\n"
+        "               (free tier). Then Runtime -> Reconnect and rerun this cell.\\n"
+        "  On Vast.ai:  pick an instance that actually has a GPU attached.\\n"
+        "  Locally:     run on a machine with an NVIDIA GPU + CUDA driver.\\n"
+    )
 
-# Ensure tqdm + matplotlib available (usually preinstalled in vastai/pytorch)
+print(f"device: {torch.cuda.get_device_name(0)}  cc={torch.cuda.get_device_capability(0)}")
+try:
+    x = torch.randn(2048, 2048, device="cuda")
+    y = x @ x
+    torch.cuda.synchronize()
+    print(f"gpu matmul OK  (sum={y.sum().item():.2f})")
+except Exception as e:
+    print("gpu matmul FAILED:", e)
+    print("If you see 'no kernel image available for sm_120' (RTX 5090 / Blackwell), run:")
+    print("  !pip install --upgrade --pre torch --index-url https://download.pytorch.org/whl/nightly/cu128")
+    raise
+
+# Ensure tqdm + matplotlib available (usually preinstalled, but Colab installs
+# can drift between images).
 try:
     import tqdm, matplotlib  # noqa: F401
 except ImportError:
