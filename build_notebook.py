@@ -273,7 +273,7 @@ Residual MLP per the DeepCubeA paper (Agostinelli et al., 2019):
 - 4 residual blocks, each 1000 → 1000 → 1000 with a skip connection.
 - Scalar output head (estimated cost-to-go).
 
-~10M parameters.
+~14.7M parameters.
 """)
 
 code("""import torch
@@ -382,13 +382,17 @@ md("""## 6. Training loop (AVI)
 3. Minimize `MSE(h_θ(s), y(s))` wrt online network `θ`.
 4. Every `target_sync_every` iters, copy `θ → θ⁻`.
 
-Uses AMP (fp16) + `torch.compile` for speed. Training keeps `ckpt_latest.pt` up to date and plots the loss curve inline at each checkpoint.
+Uses AMP (**bf16**, no GradScaler) + `torch.compile` on the online network for speed. Training keeps `ckpt_latest.pt` up to date and plots the loss curve inline at each checkpoint.
+
+> **Notes on the implementation:**
+> - `h_θ(solved) = 0` is enforced by zeroing the target when the *current* state happens to be solved (can happen when a random scramble cancels, e.g. `U U'`).
+> - The target net is **not** compiled: `load_state_dict` on a compiled module is flaky with BN buffers, and the savings from compile on the already-no-grad target path are small.
+> - bf16 instead of fp16 because early-training `h` can be large enough to overflow fp16's 65504 ceiling in `1 + h`.
 """)
 
 code("""import time
 import matplotlib.pyplot as plt
 from tqdm.auto import trange
-from IPython.display import clear_output
 
 device = torch.device("cuda")
 torch.backends.cudnn.benchmark = True
@@ -405,10 +409,10 @@ for p in target_net.parameters():
     p.requires_grad = False
 
 opt = torch.optim.Adam(net.parameters(), lr=cfg["lr"])
-scaler = torch.amp.GradScaler("cuda")
 
 loss_hist: list[float] = []
 start_iter = 0
+elapsed_before = 0.0   # wall-clock seconds accumulated in prior sessions (for resume)
 
 if RESUME_FROM is not None:
     ck = torch.load(RESUME_FROM, map_location=device)
@@ -417,24 +421,31 @@ if RESUME_FROM is not None:
     opt.load_state_dict(ck["opt"])
     loss_hist = list(ck.get("loss_hist", []))
     start_iter = ck["iter"]
-    print(f"resumed from {RESUME_FROM} at iter {start_iter}  (loss_hist len={len(loss_hist)})")
+    elapsed_before = float(ck.get("elapsed", 0.0))
+    print(f"resumed from {RESUME_FROM} at iter {start_iter}  "
+          f"(loss_hist len={len(loss_hist)}, prior elapsed={elapsed_before / 60:.1f} min)")
 
-# ---- optional torch.compile ----
+# ---- compile online net only; target net is never compiled ----
+# load_state_dict on a compiled module has surprising interactions with BN buffers,
+# and the target forward is no_grad so the speedup is small.
 try:
     net_c = torch.compile(net, mode="default")
-    target_c = torch.compile(target_net, mode="default")
-    print("torch.compile enabled")
+    print("torch.compile enabled on online network")
 except Exception as e:
     print(f"torch.compile skipped: {e}")
-    net_c, target_c = net, target_net
+    net_c = net
+target_c = target_net
 
 
 def _scramble_batch_gpu(B: int, max_k: int) -> torch.Tensor:
+    \"\"\"Generate B scrambled states with ks[i] ~ Uniform[1, max_k] random moves.
+
+    Loop runs `max_k` times unconditionally (fixed bound, no GPU->CPU sync);
+    samples with t >= ks are masked out via `torch.where`.\"\"\"
     ks = torch.randint(1, max_k + 1, (B,), device=device)
-    max_total = int(ks.max().item())
     states = SOLVED_T.unsqueeze(0).expand(B, 54).clone()
-    moves = torch.randint(0, 12, (B, max_total), device=device)
-    for t in range(max_total):
+    moves = torch.randint(0, 12, (B, max_k), device=device)
+    for t in range(max_k):
         perms = MOVE_PERMS_T[moves[:, t]]                    # (B, 54)
         new_states = states.gather(1, perms)                 # (B, 54)
         active = (t < ks).unsqueeze(1)
@@ -443,24 +454,32 @@ def _scramble_batch_gpu(B: int, max_k: int) -> torch.Tensor:
 
 
 def _compute_target(states: torch.Tensor) -> torch.Tensor:
-    \"\"\"Given (B,54) states, return (B,) target cost-to-go from target net.\"\"\"
+    \"\"\"Given (B,54) states, return (B,) target cost-to-go.
+
+    Two terminal cases, both set to 0:
+      (a) child state is solved  -> h_target(s') = 0
+      (b) current state is solved -> target(s) = 0 (occurs when a random
+          scramble cancels, e.g. `U U'`; would otherwise teach h(goal) > 0).\"\"\"
     B = states.shape[0]
-    # Expand to all 12 children: (B, 12, 54)
     next_states = states.unsqueeze(1).expand(B, 12, 54).gather(
         2, MOVE_PERMS_T.unsqueeze(0).expand(B, 12, 54)
     )
     next_flat = next_states.reshape(B * 12, 54)
-    is_terminal = (next_flat == SOLVED_T).all(dim=-1)
+    is_child_terminal = (next_flat == SOLVED_T).all(dim=-1)
     next_oh = F.one_hot(next_flat, num_classes=6).reshape(B * 12, 324).float()
-    with torch.amp.autocast("cuda", dtype=torch.float16):
-        h_next = target_c(next_oh)
-    h_next = torch.where(is_terminal, torch.zeros_like(h_next), h_next)
+    with torch.amp.autocast("cuda", dtype=torch.bfloat16):
+        h_next = target_c(next_oh).float()
+    h_next = torch.where(is_child_terminal, torch.zeros_like(h_next), h_next)
     costs = (1.0 + h_next).reshape(B, 12)
     targets = costs.min(dim=1).values
+
+    # (b) zero out target when current state is already solved.
+    is_current_terminal = (states == SOLVED_T).all(dim=-1)
+    targets = torch.where(is_current_terminal, torch.zeros_like(targets), targets)
     return targets
 
 
-def _save_ckpt(path: str, it: int) -> None:
+def _save_ckpt(path: str, it: int, elapsed_total: float) -> None:
     torch.save({
         "net": net.state_dict(),
         "target": target_net.state_dict(),
@@ -468,6 +487,7 @@ def _save_ckpt(path: str, it: int) -> None:
         "iter": it,
         "cfg": cfg,
         "loss_hist": loss_hist,
+        "elapsed": elapsed_total,
     }, path)
 
 
@@ -499,14 +519,13 @@ for it in pbar:
         targets = _compute_target(states)
 
     states_oh = F.one_hot(states, num_classes=6).reshape(states.shape[0], 324).float()
-    with torch.amp.autocast("cuda", dtype=torch.float16):
+    with torch.amp.autocast("cuda", dtype=torch.bfloat16):
         pred = net_c(states_oh)
-        loss = F.mse_loss(pred, targets.float())
+        loss = F.mse_loss(pred.float(), targets)
 
     opt.zero_grad(set_to_none=True)
-    scaler.scale(loss).backward()
-    scaler.step(opt)
-    scaler.update()
+    loss.backward()
+    opt.step()
 
     loss_hist.append(float(loss.detach()))
 
@@ -517,15 +536,18 @@ for it in pbar:
         target_net.load_state_dict(net.state_dict())
 
     if (it + 1) % cfg["ckpt_every"] == 0:
-        _save_ckpt("ckpt_latest.pt", it + 1)
-        clear_output(wait=True)
+        elapsed_total = elapsed_before + (time.time() - t0)
+        _save_ckpt("ckpt_latest.pt", it + 1, elapsed_total)
+        # Show loss without clearing output — tqdm bar stays put and plots stack.
         _plot_loss(f"iter {it + 1}/{cfg['n_iters']}  last-100 mean loss: {np.mean(loss_hist[-100:]):.4f}")
-        print(f"saved ckpt_latest.pt  |  elapsed {(time.time() - t0) / 60:.1f} min")
+        print(f"saved ckpt_latest.pt  |  elapsed {elapsed_total / 60:.1f} min")
 
 # Final plot + save
+elapsed_total = elapsed_before + (time.time() - t0)
 _plot_loss(f"training complete ({cfg['n_iters']} iters)")
-torch.save({"net": net.state_dict(), "cfg": cfg, "loss_hist": loss_hist}, "deepcube_cube3.pt")
-print(f"saved deepcube_cube3.pt  ({(time.time() - t0) / 60:.1f} min total)")
+torch.save({"net": net.state_dict(), "cfg": cfg, "loss_hist": loss_hist,
+            "elapsed": elapsed_total}, "deepcube_cube3.pt")
+print(f"saved deepcube_cube3.pt  ({elapsed_total / 60:.1f} min total)")
 """)
 
 # ----------------------------------------------------------------------
