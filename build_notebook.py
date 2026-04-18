@@ -359,6 +359,21 @@ torch.backends.cudnn.benchmark = True
 SOLVED_T = torch.from_numpy(SOLVED).long().to(device)            # (54,)
 MOVE_PERMS_T = torch.from_numpy(MOVE_PERMS).long().to(device)     # (12, 54)
 
+# ---- fixed validation set: same scrambles at every checkpoint so the
+# per-depth success-rate curve is comparable across the whole run ----
+VAL_DEPTHS = [1, 2, 3, 5, 8, 12, 20, 26]
+N_VAL_PER_DEPTH = 30
+_val_rng = np.random.default_rng(7777)
+val_sets = {}
+for _d in VAL_DEPTHS:
+    _starts = []
+    for _ in range(N_VAL_PER_DEPTH):
+        _s = SOLVED.copy()
+        for _m in _val_rng.integers(0, 12, size=_d):
+            _s = _s[MOVE_PERMS[int(_m)]]
+        _starts.append(_s.copy())
+    val_sets[_d] = np.stack(_starts)
+
 # ---- networks ----
 net = DeepCubeANet().to(device)
 target_net = DeepCubeANet().to(device)
@@ -370,8 +385,9 @@ for p in target_net.parameters():
 opt = torch.optim.Adam(net.parameters(), lr=cfg["lr"])
 
 loss_hist: list[float] = []
+val_history: list[dict] = []   # each: {iter, success: {d: rate}, avg_len: {d: mean}}
 start_iter = 0
-elapsed_before = 0.0   # wall-clock seconds accumulated in prior sessions (for resume)
+elapsed_before = 0.0
 
 if RESUME_FROM is not None:
     ck = torch.load(RESUME_FROM, map_location=device)
@@ -379,14 +395,14 @@ if RESUME_FROM is not None:
     target_net.load_state_dict(ck["target"])
     opt.load_state_dict(ck["opt"])
     loss_hist = list(ck.get("loss_hist", []))
+    val_history = list(ck.get("val_history", []))
     start_iter = ck["iter"]
     elapsed_before = float(ck.get("elapsed", 0.0))
-    print(f"resumed from {RESUME_FROM} at iter {start_iter}  "
-          f"(loss_hist len={len(loss_hist)}, prior elapsed={elapsed_before / 60:.1f} min)")
+    print(f"resumed from {RESUME_FROM} at iter {start_iter} "
+          f"(loss len={len(loss_hist)}, val pts={len(val_history)}, "
+          f"prior elapsed={elapsed_before / 60:.1f} min)")
 
 # ---- compile online net only; target net is never compiled ----
-# load_state_dict on a compiled module has surprising interactions with BN buffers,
-# and the target forward is no_grad so the speedup is small.
 try:
     net_c = torch.compile(net, mode="default")
     print("torch.compile enabled on online network")
@@ -396,33 +412,22 @@ except Exception as e:
 target_c = target_net
 
 
-def _scramble_batch_gpu(B: int, max_k: int) -> torch.Tensor:
-    \"\"\"Generate B scrambled states with ks[i] ~ Uniform[1, max_k] random moves.
-
-    Loop runs `max_k` times unconditionally (fixed bound, no GPU->CPU sync);
-    samples with t >= ks are masked out via `torch.where`.\"\"\"
+def _scramble_batch_gpu(B, max_k):
     ks = torch.randint(1, max_k + 1, (B,), device=device)
     states = SOLVED_T.unsqueeze(0).expand(B, 54).clone()
     moves = torch.randint(0, 12, (B, max_k), device=device)
     for t in range(max_k):
-        perms = MOVE_PERMS_T[moves[:, t]]                    # (B, 54)
-        new_states = states.gather(1, perms)                 # (B, 54)
+        perms = MOVE_PERMS_T[moves[:, t]]
+        new_states = states.gather(1, perms)
         active = (t < ks).unsqueeze(1)
         states = torch.where(active, new_states, states)
     return states
 
 
-def _compute_target(states: torch.Tensor) -> torch.Tensor:
-    \"\"\"Given (B,54) states, return (B,) target cost-to-go.
-
-    Two terminal cases, both set to 0:
-      (a) child state is solved  -> h_target(s') = 0
-      (b) current state is solved -> target(s) = 0 (occurs when a random
-          scramble cancels, e.g. `U U'`; would otherwise teach h(goal) > 0).\"\"\"
+def _compute_target(states):
     B = states.shape[0]
     next_states = states.unsqueeze(1).expand(B, 12, 54).gather(
-        2, MOVE_PERMS_T.unsqueeze(0).expand(B, 12, 54)
-    )
+        2, MOVE_PERMS_T.unsqueeze(0).expand(B, 12, 54))
     next_flat = next_states.reshape(B * 12, 54)
     is_child_terminal = (next_flat == SOLVED_T).all(dim=-1)
     next_oh = F.one_hot(next_flat, num_classes=6).reshape(B * 12, 324).float()
@@ -431,14 +436,50 @@ def _compute_target(states: torch.Tensor) -> torch.Tensor:
     h_next = torch.where(is_child_terminal, torch.zeros_like(h_next), h_next)
     costs = (1.0 + h_next).reshape(B, 12)
     targets = costs.min(dim=1).values
-
-    # (b) zero out target when current state is already solved.
     is_current_terminal = (states == SOLVED_T).all(dim=-1)
-    targets = torch.where(is_current_terminal, torch.zeros_like(targets), targets)
-    return targets
+    return torch.where(is_current_terminal, torch.zeros_like(targets), targets)
 
 
-def _save_ckpt(path: str, it: int, elapsed_total: float) -> None:
+@torch.no_grad()
+def run_validation():
+    \"\"\"Batched greedy rollout on the fixed val set. Returns {depth: {rate, avg_len}}.\"\"\"
+    net.eval()
+    out = {}
+    for d in VAL_DEPTHS:
+        starts = torch.from_numpy(val_sets[d]).long().to(device)
+        N = starts.shape[0]
+        states = starts.clone()
+        steps = torch.zeros(N, dtype=torch.long, device=device)
+        solved = (states == SOLVED_T).all(dim=-1)
+        max_steps = d * 3 + 10
+        for _ in range(max_steps):
+            active = ~solved
+            if not active.any():
+                break
+            act_idx = torch.where(active)[0]
+            act_states = states[act_idx]
+            K = act_states.shape[0]
+            children = act_states.unsqueeze(1).expand(K, 12, 54).gather(
+                2, MOVE_PERMS_T.unsqueeze(0).expand(K, 12, 54))
+            flat = children.reshape(K * 12, 54)
+            oh = F.one_hot(flat, num_classes=6).reshape(K * 12, 324).float()
+            with torch.amp.autocast("cuda", dtype=torch.bfloat16):
+                h = net(oh).float().reshape(K, 12)
+            is_term = (children == SOLVED_T).all(dim=-1)
+            cost = (1.0 + h).masked_fill(is_term, 0.0)
+            best = cost.argmin(dim=1)
+            chosen = children[torch.arange(K, device=device), best]
+            states[act_idx] = chosen
+            steps[act_idx] += 1
+            solved = (states == SOLVED_T).all(dim=-1)
+        n_solved = int(solved.sum().cpu())
+        avg_len = float(steps[solved].float().mean().cpu()) if n_solved > 0 else 0.0
+        out[d] = {"rate": n_solved / N, "avg_len": avg_len}
+    net.train()
+    return out
+
+
+def _save_ckpt(path, it, elapsed_total):
     torch.save({
         "net": net.state_dict(),
         "target": target_net.state_dict(),
@@ -446,26 +487,111 @@ def _save_ckpt(path: str, it: int, elapsed_total: float) -> None:
         "iter": it,
         "cfg": cfg,
         "loss_hist": loss_hist,
+        "val_history": val_history,
         "elapsed": elapsed_total,
     }, path)
 
 
-def _plot_loss(title: str) -> None:
+def _plot_progress(title):
+    \"\"\"Checkpoint-time plot: loss + per-depth success rate over training.\"\"\"
     if not loss_hist:
         return
-    plt.figure(figsize=(10, 3.5))
-    plt.plot(loss_hist, linewidth=0.6, alpha=0.6, label="per-iter")
+    fig, (ax_l, ax_v) = plt.subplots(1, 2, figsize=(14, 4.2))
+    ax_l.plot(loss_hist, linewidth=0.5, alpha=0.45, color="#5eaeff", label="per-iter")
     w = max(1, len(loss_hist) // 200)
     if len(loss_hist) > w:
-        smooth = np.convolve(loss_hist, np.ones(w) / w, mode="valid")
-        plt.plot(range(w - 1, len(loss_hist)), smooth, linewidth=1.5, label=f"MA-{w}")
-    plt.yscale("log")
-    plt.xlabel("iter")
-    plt.ylabel("MSE loss")
-    plt.title(title)
-    plt.legend()
+        sm = np.convolve(loss_hist, np.ones(w)/w, mode="valid")
+        ax_l.plot(range(w-1, len(loss_hist)), sm, linewidth=1.8, color="#1e3a5f", label=f"MA-{w}")
+    ax_l.set_yscale("log")
+    ax_l.set_xlabel("iteration"); ax_l.set_ylabel("MSE loss")
+    ax_l.set_title("training loss")
+    ax_l.grid(alpha=0.3); ax_l.legend()
+
+    if val_history:
+        iters = [v["iter"] for v in val_history]
+        cmap = plt.get_cmap("viridis")
+        for i, d in enumerate(VAL_DEPTHS):
+            rates = [v["success"][d] for v in val_history]
+            ax_v.plot(iters, rates, marker="o", markersize=3, linewidth=1.3,
+                      color=cmap(i / max(1, len(VAL_DEPTHS) - 1)), label=f"k={d}")
+        ax_v.set_xlabel("iteration"); ax_v.set_ylabel("greedy success rate")
+        ax_v.set_ylim(-0.05, 1.05)
+        ax_v.set_title(f"validation ({N_VAL_PER_DEPTH} scrambles per depth)")
+        ax_v.grid(alpha=0.3); ax_v.legend(loc="upper left", fontsize=9, ncol=2)
+    else:
+        ax_v.text(0.5, 0.5, "no validation yet", ha="center", va="center",
+                  transform=ax_v.transAxes, color="gray")
+        ax_v.set_axis_off()
+
+    fig.suptitle(title)
+    plt.tight_layout(); plt.show(); plt.close(fig)
+
+
+def save_final_figure(out_path="training_summary.png"):
+    \"\"\"Paper-quality 3-panel summary, saved as PNG + PDF.\"\"\"
+    if not loss_hist:
+        return
+    fig, axes = plt.subplots(1, 3, figsize=(18, 4.8))
+
+    ax = axes[0]
+    ax.plot(loss_hist, linewidth=0.4, alpha=0.4, color="#5eaeff")
+    w = max(1, len(loss_hist) // 200)
+    if len(loss_hist) > w:
+        sm = np.convolve(loss_hist, np.ones(w)/w, mode="valid")
+        ax.plot(range(w-1, len(loss_hist)), sm, linewidth=2.0, color="#1e3a5f", label=f"MA-{w}")
+    ax.set_yscale("log")
+    ax.set_xlabel("iteration"); ax.set_ylabel("MSE loss")
+    ax.set_title(f"(a) training loss · {cfg['n_iters']:,} iters · batch={cfg['batch_size']:,}")
+    ax.grid(alpha=0.3); ax.legend()
+
+    ax = axes[1]
+    if val_history:
+        iters = [v["iter"] for v in val_history]
+        cmap = plt.get_cmap("viridis")
+        for i, d in enumerate(VAL_DEPTHS):
+            rates = [v["success"][d] for v in val_history]
+            ax.plot(iters, rates, marker="o", markersize=3.5, linewidth=1.4,
+                    color=cmap(i / max(1, len(VAL_DEPTHS) - 1)), label=f"k={d}")
+        ax.set_xlabel("iteration"); ax.set_ylabel("greedy success rate")
+        ax.set_ylim(-0.05, 1.05)
+        ax.set_title("(b) validation success over training")
+        ax.grid(alpha=0.3); ax.legend(loc="upper left", fontsize=9, ncol=2)
+    else:
+        ax.text(0.5, 0.5, "no validation data", ha="center", va="center",
+                transform=ax.transAxes, color="gray"); ax.set_axis_off()
+
+    ax = axes[2]
+    if val_history:
+        last = val_history[-1]["success"]
+        rates = [last[d] for d in VAL_DEPTHS]
+        bars = ax.bar([str(d) for d in VAL_DEPTHS], rates,
+                      color="#5ed987", edgecolor="#2a5f3a", width=0.7)
+        for bar, r in zip(bars, rates):
+            ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.02,
+                    f"{r*100:.0f}%", ha="center", va="bottom", fontsize=10)
+        ax.set_xlabel("scramble depth (k)"); ax.set_ylabel("greedy success rate")
+        ax.set_ylim(0, 1.1)
+        ax.set_title(f"(c) final · {N_VAL_PER_DEPTH} scrambles per depth")
+        ax.grid(alpha=0.3, axis="y")
+    else:
+        ax.text(0.5, 0.5, "no validation data", ha="center", va="center",
+                transform=ax.transAxes, color="gray"); ax.set_axis_off()
+
+    elapsed_total = elapsed_before + (time.time() - t0)
+    fig.suptitle(
+        f"DeepCubeA · preset={PRESET} · {cfg['n_iters']:,} iters · elapsed {elapsed_total/60:.1f} min",
+        fontsize=13,
+    )
     plt.tight_layout()
-    plt.show()
+    plt.savefig(out_path, dpi=150, bbox_inches="tight")
+    pdf_path = out_path.replace(".png", ".pdf")
+    plt.savefig(pdf_path, bbox_inches="tight")
+    plt.show(); plt.close(fig)
+    print(f"saved {out_path} + {pdf_path}")
+
+
+def _val_summary(val):
+    return "  ".join(f"k={d}:{val[d]['rate']*100:3.0f}%" for d in VAL_DEPTHS)
 
 
 # ---- main loop ----
@@ -496,17 +622,38 @@ for it in pbar:
 
     if (it + 1) % cfg["ckpt_every"] == 0:
         elapsed_total = elapsed_before + (time.time() - t0)
+        val = run_validation()
+        val_history.append({
+            "iter": it + 1,
+            "success": {d: v["rate"] for d, v in val.items()},
+            "avg_len": {d: v["avg_len"] for d, v in val.items()},
+        })
         _save_ckpt("ckpt_latest.pt", it + 1, elapsed_total)
-        # Show loss without clearing output — tqdm bar stays put and plots stack.
-        _plot_loss(f"iter {it + 1}/{cfg['n_iters']}  last-100 mean loss: {np.mean(loss_hist[-100:]):.4f}")
-        print(f"saved ckpt_latest.pt  |  elapsed {elapsed_total / 60:.1f} min")
+        _plot_progress(
+            f"iter {it + 1:,} / {cfg['n_iters']:,}  |  "
+            f"loss MA100: {np.mean(loss_hist[-100:]):.4f}  |  {_val_summary(val)}"
+        )
+        print(f"[{it + 1:>7,} / {cfg['n_iters']:,}]  "
+              f"loss={np.mean(loss_hist[-100:]):.4f}  "
+              f"elapsed={elapsed_total/60:.1f}m  "
+              f"{_val_summary(val)}")
 
-# Final plot + save
+# ---- final ----
 elapsed_total = elapsed_before + (time.time() - t0)
-_plot_loss(f"training complete ({cfg['n_iters']} iters)")
-torch.save({"net": net.state_dict(), "cfg": cfg, "loss_hist": loss_hist,
+# Run a final validation if the last one is stale.
+if not val_history or val_history[-1]["iter"] < cfg["n_iters"]:
+    val = run_validation()
+    val_history.append({
+        "iter": cfg["n_iters"],
+        "success": {d: v["rate"] for d, v in val.items()},
+        "avg_len": {d: v["avg_len"] for d, v in val.items()},
+    })
+save_final_figure("training_summary.png")
+torch.save({"net": net.state_dict(), "cfg": cfg,
+            "loss_hist": loss_hist, "val_history": val_history,
             "elapsed": elapsed_total}, "deepcube_cube3.pt")
-print(f"saved deepcube_cube3.pt  ({elapsed_total / 60:.1f} min total)")
+print(f"\\n训练完成 · preset={PRESET} · {cfg['n_iters']:,} iters · "
+      f"{elapsed_total/60:.1f} min · 产出: deepcube_cube3.pt + training_summary.png")
 """)
 
 # ----------------------------------------------------------------------
