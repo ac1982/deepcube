@@ -127,6 +127,23 @@
   }
   .moves .qtm-raw { display: none; color: var(--muted); font-size: 11px; margin-top: 4px; }
   .moves.show-qtm .qtm-raw { display: block; }
+
+  /* Step-through playback */
+  .htm-step {
+    display: inline-block; padding: 2px 6px; margin: 2px 1px;
+    border-radius: 4px; font-family: ui-monospace, Menlo, monospace;
+    font-size: 13px; transition: all .18s ease;
+  }
+  .htm-step.done    { color: var(--good); opacity: 0.6; }
+  .htm-step.current { background: var(--accent); color: #0a1220; font-weight: 700;
+                      box-shadow: 0 0 0 2px rgba(94,174,255,0.35); }
+  .htm-step.pending { color: var(--muted); }
+  #step-controls { margin-top: 12px; display: none; }
+  #step-controls.visible { display: block; }
+  #step-info { font-size: 12px; color: var(--muted); margin-bottom: 8px; line-height: 1.5; }
+  #step-info b { color: var(--text); }
+  .step-buttons { display: flex; gap: 6px; }
+  .step-buttons button { padding: 7px 6px; font-size: 12px; width: auto; margin-top: 0; flex: 1; }
   .stats { font-size: 12px; color: var(--muted); line-height: 1.7; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
   .stats b { color: var(--text); font-weight: 500; }
   .badge { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 11px; font-weight: 600; }
@@ -203,6 +220,14 @@
       </div>
       <div id="solveStats" class="stats" style="margin-top: 10px;"></div>
       <div id="solveMoves" class="moves"></div>
+      <div id="step-controls">
+        <div id="step-info"></div>
+        <div class="step-buttons">
+          <button id="prevStepBtn" class="secondary">← 上一步</button>
+          <button id="nextStepBtn">下一步 →</button>
+          <button id="playAllBtn" class="secondary">▶ 自动</button>
+        </div>
+      </div>
     </section>
 
     <section>
@@ -423,6 +448,14 @@ let solvedState = null;
 let stickerLookup = null;   // Map "px,py,pz,nx,ny,nz" -> sticker index 0..53
 let centerSet = null;       // Set<int>, sticker indices that are face centers
 
+// Step-through playback state. Set after a successful /solve, cleared on
+// Scramble / Reset / enterEditMode so each new solution owns the playback.
+// `qtm` is the raw quarter-turn list that drives animation; `htm` is the
+// human-readable compacted list that drives step indices and display.
+// Each htm[i] corresponds to htmTokenToQtm(htm[i]) quarter turns.
+let currentSolve = null;        // { qtm: [...], htm: [...], htmIdx: int, solver, pathLenQtm, pathLenHtm, elapsedSec }
+let autoplayToken = null;       // Symbol — identity used to cancel an in-flight autoplay loop
+
 function applyPerm(s, perm) {
   const out = new Int8Array(54);
   for (let i = 0; i < 54; i++) out[i] = s[perm[i]];
@@ -449,15 +482,15 @@ function qtmToHtm(moves) {
   return out;
 }
 
-function formatMovesPretty(moves) {
-  const htm = qtmToHtm(moves);
-  // Wrap every 8 moves onto a new line so long solves stay readable.
-  const lines = [];
-  for (let i = 0; i < htm.length; i += 8) lines.push(htm.slice(i, i + 8).join(' '));
-  const htmBlock = `<code class="htm">${lines.join('<br>')}</code>`;
-  return `${htmBlock}
-    <span class="qtm-toggle" onclick="this.parentElement.classList.toggle('show-qtm')">显示 QTM 展开</span>
-    <div class="qtm-raw">${moves.join(' ')}</div>`;
+function htmTokenToQtm(tok) {
+  if (tok.endsWith('2')) return [tok[0], tok[0]];
+  return [tok];
+}
+
+function inverseHtm(tok) {
+  if (tok.endsWith('2')) return tok;                  // X2 is its own inverse
+  if (tok.endsWith("'")) return tok.slice(0, -1);     // X' -> X
+  return tok + "'";                                   // X  -> X'
 }
 
 // ---- DOM wiring ----
@@ -495,10 +528,115 @@ function updateButtons() {
   $('lambdaRow').style.display = solver === 'deepcube' ? 'flex' : 'none';
   // Grey out the DeepCubeA radio label when no model is loaded.
   $('deepcubeOpt').classList.toggle('disabled', !modelLoaded);
+
+  // Step controls (if a solution is active)
+  const prev = $('prevStepBtn'), next = $('nextStepBtn'), play = $('playAllBtn');
+  if (prev) {
+    const cs = currentSolve;
+    const atStart = !cs || cs.htmIdx <= 0;
+    const atEnd = !cs || cs.htmIdx >= cs.htm.length;
+    prev.disabled = busy || atStart;
+    next.disabled = busy || atEnd;
+    // Autoplay button: normally disabled when busy, but enabled WHILE autoplay
+    // is running so the user can click it again to cancel.
+    play.disabled = (busy && !autoplayToken) || atEnd;
+    play.textContent = autoplayToken ? '■ 停止' : '▶ 自动';
+  }
 }
 function setBusy(b) { busy = b; updateButtons(); }
 function setStats(html) { $('solveStats').innerHTML = html; }
 function setMoves(html) { $('solveMoves').innerHTML = html; }
+
+function clearSolution() {
+  currentSolve = null;
+  if (autoplayToken) autoplayToken = null;
+  setMoves('');
+  $('step-controls').classList.remove('visible');
+  updateButtons();
+}
+
+function renderSolution() {
+  if (!currentSolve) { clearSolution(); return; }
+  const { htm, htmIdx, pathLenQtm, pathLenHtm, qtm, solver, elapsedSec } = currentSolve;
+
+  // The HTM move list, each token in its own span so we can highlight the current one.
+  const tokens = htm.map((t, i) => {
+    const cls = i < htmIdx ? 'done' : i === htmIdx ? 'current' : 'pending';
+    return `<span class="htm-step ${cls}">${t}</span>`;
+  });
+  const lines = [];
+  for (let i = 0; i < tokens.length; i += 8) lines.push(tokens.slice(i, i + 8).join(' '));
+  const htmBlock = lines.join('<br>');
+  const rawBlock = `<span class="qtm-toggle" onclick="this.parentElement.classList.toggle('show-qtm')">显示 QTM 展开</span>
+    <div class="qtm-raw">${qtm.join(' ')}</div>`;
+  setMoves(htmBlock + rawBlock);
+
+  const sc = $('step-controls');
+  sc.classList.add('visible');
+  const info = $('step-info');
+  if (htmIdx >= htm.length) {
+    info.innerHTML = `<span style="color: var(--good);">✓ 还原完成！共 ${pathLenHtm} 步 HTM / ${pathLenQtm} QTM · ${solver} · ${elapsedSec.toFixed(3)}s</span>`;
+  } else {
+    info.innerHTML = `第 <b>${htmIdx + 1}</b> / ${pathLenHtm} 步 · 下一步: <b>${htm[htmIdx]}</b>`;
+  }
+  updateButtons();
+}
+
+async function playOneStep(direction) {
+  if (busy || !currentSolve) return;
+  const cs = currentSolve;
+  let qtmMoves;
+  if (direction === 'forward') {
+    if (cs.htmIdx >= cs.htm.length) return;
+    qtmMoves = htmTokenToQtm(cs.htm[cs.htmIdx]);
+    cs.htmIdx++;
+  } else {
+    if (cs.htmIdx <= 0) return;
+    cs.htmIdx--;
+    qtmMoves = htmTokenToQtm(inverseHtm(cs.htm[cs.htmIdx]));
+  }
+  setBusy(true);
+  try {
+    await animateSequence(qtmMoves, 220);
+    for (const m of qtmMoves) state = applyPerm(state, movePerms[moveNameToIdx[m]]);
+  } finally {
+    setBusy(false);
+  }
+  renderSolution();
+}
+
+async function playAutoForward() {
+  if (!currentSolve) return;
+  if (autoplayToken) {    // already running -> cancel
+    autoplayToken = null;
+    updateButtons();
+    return;
+  }
+  const token = Symbol('autoplay');
+  autoplayToken = token;
+  updateButtons();
+  try {
+    while (autoplayToken === token &&
+           currentSolve && currentSolve.htmIdx < currentSolve.htm.length) {
+      const cs = currentSolve;
+      const qtmMoves = htmTokenToQtm(cs.htm[cs.htmIdx]);
+      setBusy(true);
+      try {
+        await animateSequence(qtmMoves, 180);
+        for (const m of qtmMoves) state = applyPerm(state, movePerms[moveNameToIdx[m]]);
+      } finally {
+        setBusy(false);
+      }
+      cs.htmIdx++;
+      renderSolution();
+      if (autoplayToken !== token) break;
+      await new Promise(r => setTimeout(r, 180));
+    }
+  } finally {
+    if (autoplayToken === token) autoplayToken = null;
+    updateButtons();
+  }
+}
 
 function disposeCubies() {
   for (const c of cubies) {
@@ -689,7 +827,8 @@ buildPalette();
 
 $('scrambleBtn').onclick = async () => {
   if (busy) return;
-  setBusy(true); setStats(''); setMoves('');
+  clearSolution();
+  setBusy(true); setStats('');
   try {
     const depth = parseInt(depthSlider.value, 10);
     const resp = await fetch('/scramble', {
@@ -729,16 +868,24 @@ $('solveBtn').onclick = async () => {
     }
     const r = await resp.json();
     if (r.solved) {
-      await animateSequence(r.moves, 160);
-      for (const m of r.moves) state = applyPerm(state, movePerms[moveNameToIdx[m]]);
-      const htm = r.path_length_htm != null ? ` / ${r.path_length_htm} HTM` : '';
+      const htm = qtmToHtm(r.moves);
+      currentSolve = {
+        qtm: r.moves, htm, htmIdx: 0,
+        solver: r.solver,
+        pathLenQtm: r.path_length,
+        pathLenHtm: r.path_length_htm != null ? r.path_length_htm : htm.length,
+        elapsedSec: r.elapsed_sec,
+      };
+      const htmLabel = r.path_length_htm != null ? ` / ${r.path_length_htm} HTM` : ` / ${htm.length} HTM`;
       const nodes = (r.solver === 'deepcube')
         ? ` · 展开 ${r.nodes_expanded.toLocaleString()} · 生成 ${r.nodes_generated.toLocaleString()}`
         : '';
       setStats(
-        `<b>${r.solver}</b> 用 ${r.path_length} QTM${htm} 求解${nodes} · ${r.elapsed_sec.toFixed(3)}s`
+        `<b>${r.solver}</b> 找到 ${r.path_length} QTM${htmLabel} 路径${nodes} · ${r.elapsed_sec.toFixed(3)}s<br>` +
+        `点 <b>下一步</b> 开始逐步还原（可跟着你手里的魔方拧）`
       );
-      setMoves(formatMovesPretty(r.moves));
+      renderSolution();
+      return;   // skip the busy-off in finally — renderSolution already called updateButtons
     } else {
       setStats(`<span style="color: var(--warn)">${r.solver} 停止：${r.stop_reason}` +
                ` · ${r.elapsed_sec.toFixed(3)}s</span>`);
@@ -750,11 +897,17 @@ $('solveBtn').onclick = async () => {
 
 $('resetBtn').onclick = () => {
   if (busy || editMode) return;
+  clearSolution();
   doReset();
 };
 
+$('prevStepBtn').onclick = () => playOneStep('backward');
+$('nextStepBtn').onclick = () => playOneStep('forward');
+$('playAllBtn').onclick = () => playAutoForward();
+
 function enterEditMode() {
   editMode = true;
+  clearSolution();
   buildPalette();   // defensive: ensures palette buttons exist and listeners are fresh
   render2DNet();
   document.getElementById('edit-overlay').classList.add('open');
