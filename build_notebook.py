@@ -19,33 +19,31 @@ def code(text: str) -> None:
     })
 
 
-md("""# DeepCubeA — 3×3 Rubik's Cube (PyTorch)
+md("""# DeepCubeA 训练
 
-Trains a neural heuristic for Rubik's cube via **Approximate Value Iteration (AVI)** on randomly scrambled states. No external dataset — states are generated on the fly from the solved cube.
+用**近似值迭代（AVI）**在线生成扰动状态，训练神经网络估计到还原态的距离。不需要任何外部数据集。
 
-## Quick start on Vast.ai
-1. Rent an instance with template `vastai/pytorch` (latest), 1× RTX 5090, on-demand.
-2. Upload this notebook to the Jupyter Lab file browser.
-3. Run all cells top-to-bottom.
-4. When done, download `deepcube_cube3.pt` before destroying the instance.
+## 两档预设（第 5 格改 `PRESET`）
 
-## Expected runtime on single RTX 5090
-| preset | iters | approx time | cost @ $0.30/hr |
-|---|---|---|---|
-| `smoke` | 1,000 | ~5 min | ~$0.03 |
-| `demo` | 50,000 | ~1–2 h | ~$0.50 |
-| `paper` | 1,000,000 | ~12 h | ~$3.60 |
+| 预设 | 迭代数 | 用途 |
+|---|---|---|
+| `smoke` | 1 000 | 验证代码跑通，约 5 分钟 |
+| `paper` | 1 000 000 | 正式训练（RTX 5090 ~12h，T4/Colab 免费档跑不完） |
 
-## Outputs
-- `ckpt_latest.pt` — saved every `ckpt_every` iterations (resume with `RESUME_FROM`).
-- `deepcube_cube3.pt` — final model weights (this is what you download).
-- Inline loss curves at each checkpoint.
+## 产物
+
+- `ckpt_latest.pt` — 每 `ckpt_every` 步保存，断开后把 `RESUME_FROM = "ckpt_latest.pt"` 可续训
+- `deepcube_cube3.pt` — 训练结束产出的最终权重，下载到本地放进 `checkpoints/`
+
+## Colab 使用
+
+`Runtime → Change runtime type → Hardware accelerator: GPU`，依次运行所有 cell。
 """)
 
 # ----------------------------------------------------------------------
-md("""## 1. Setup & GPU check
+md("""## 1. GPU 检查
 
-Verifies CUDA, checks that Blackwell kernels work. If the smoke matmul fails on a 5090 with a "no kernel image" error, install PyTorch nightly (cell will print the command).
+没有 CUDA 就直接报错，告诉你去哪改 runtime。
 """)
 
 code("""import subprocess, shutil, sys
@@ -62,12 +60,12 @@ import torch, numpy as np
 print(f"torch={torch.__version__}  numpy={np.__version__}  cuda_available={torch.cuda.is_available()}")
 if not torch.cuda.is_available():
     raise RuntimeError(
-        "No CUDA device available. This notebook trains a neural net and is GPU-only.\\n"
+        "没有可用的 CUDA 设备。本 notebook 训练神经网络，必须有 GPU。\\n"
         "\\n"
-        "  On Colab:    Runtime -> Change runtime type -> Hardware accelerator -> T4 GPU\\n"
-        "               (free tier). Then Runtime -> Reconnect and rerun this cell.\\n"
-        "  On Vast.ai:  pick an instance that actually has a GPU attached.\\n"
-        "  Locally:     run on a machine with an NVIDIA GPU + CUDA driver.\\n"
+        "  Colab:     Runtime -> Change runtime type -> Hardware accelerator: GPU\\n"
+        "             然后 Runtime -> Reconnect，再重跑这一格。\\n"
+        "  Vast.ai:   租实例时选带 GPU 的。\\n"
+        "  本机:       在装了 NVIDIA 驱动 + CUDA 的机器上跑。\\n"
     )
 
 print(f"device: {torch.cuda.get_device_name(0)}  cc={torch.cuda.get_device_capability(0)}")
@@ -92,27 +90,9 @@ except ImportError:
 """)
 
 # ----------------------------------------------------------------------
-md("""## 2. Cube environment
+md("""## 2. 魔方环境
 
-**State:** 54 stickers, each holding a color in `0..5` (U=0, F=1, R=2, B=3, L=4, D=5).
-
-**Index layout** (standard net):
-
-```
-        U0 U1 U2
-        U3 U4 U5
-        U6 U7 U8
-L0..L8  F0..F8  R0..R8  B0..B8
-        D0 D1 D2
-        D3 D4 D5
-        D6 D7 D8
-```
-
-U=0..8, F=9..17, R=18..26, B=27..35, L=36..44, D=45..53.
-
-**Moves:** 12 quarter-turns `U,U',D,D',F,F',B,B',R,R',L,L'` (ordered in pairs so `move^1` gives inverse).
-
-Each move is a 54-permutation built algorithmically by rotating the affected cubies in 3-space and re-mapping (cubie-position, sticker-normal) back to sticker index.
+54 格状态（0=U, 1=F, 2=R, 3=B, 4=L, 5=D）+ 12 个四分之一转。下面构建 12 个置换表。
 """)
 
 code("""import numpy as np
@@ -226,9 +206,9 @@ def batch_scramble(B: int, max_k: int, rng):
 """)
 
 # ----------------------------------------------------------------------
-md("""## 3. Sanity tests
+md("""## 3. Sanity 测试
 
-If any assertion fails, the env has a bug — don't train on it.
+置换表正确性检查。任何断言失败就不要训练。
 """)
 
 code("""def _run_env_tests():
@@ -278,16 +258,9 @@ _run_env_tests()
 """)
 
 # ----------------------------------------------------------------------
-md("""## 4. Model
+md("""## 4. 模型
 
-Residual MLP per the DeepCubeA paper (Agostinelli et al., 2019):
-
-- Input: one-hot 54×6 = **324** dim.
-- FC 324 → 5000 → 1000 (BatchNorm + ReLU after each).
-- 4 residual blocks, each 1000 → 1000 → 1000 with a skip connection.
-- Scalar output head (estimated cost-to-go).
-
-~14.7M parameters.
+残差 MLP：324 → 5000 → 1000 + 4× 残差块(1000) + 标量头。约 14.7M 参数。
 """)
 
 code("""import torch
@@ -337,19 +310,13 @@ del _tmp
 """)
 
 # ----------------------------------------------------------------------
-md("""## 5. Config
+md("""## 5. 配置
 
-Three presets. **Change `PRESET` here** if you want to swap.
-
-- `smoke` (~5 min): verifies the full pipeline works. Trains a weak heuristic on scrambles ≤10.
-- `demo` (~1–2 h): decent heuristic for common scrambles.
-- `paper` (~12 h): full paper configuration on 1M iterations.
-
-To resume from a crash / disconnect, set `RESUME_FROM = "ckpt_latest.pt"`.
+两档：`smoke` 先跑通、`paper` 正式训练。`RESUME_FROM = "ckpt_latest.pt"` 可续训。
 """)
 
-code("""PRESET = "paper"          # "smoke" | "demo" | "paper"
-RESUME_FROM = None        # e.g. "ckpt_latest.pt" to continue training
+code("""PRESET = "smoke"          # "smoke" (~5 min, 验证) or "paper" (~12h on 5090, 正式)
+RESUME_FROM = None        # 从 checkpoint 续训：填 "ckpt_latest.pt"
 
 CONFIGS = {
     "smoke": dict(
@@ -359,14 +326,6 @@ CONFIGS = {
         target_sync_every=500,
         ckpt_every=500,
         lr=1e-3,
-    ),
-    "demo": dict(
-        n_iters=50_000,
-        batch_size=5_000,
-        max_scramble=20,
-        target_sync_every=2_500,
-        ckpt_every=5_000,
-        lr=5e-4,
     ),
     "paper": dict(
         n_iters=1_000_000,
@@ -385,23 +344,9 @@ for k, v in cfg.items():
 """)
 
 # ----------------------------------------------------------------------
-md("""## 6. Training loop (AVI)
+md("""## 6. 训练（AVI）
 
-**Approximate Value Iteration:**
-
-1. Sample batch of scrambled states `s ~ scramble(k), k ~ Uniform[1, K]`.
-2. For each `s`, expand all 12 children `s'` and compute target:
-   $$y(s) = \\min_a \\Big(1 + h_{\\theta^-}(s')\\Big)$$
-   where `h_{θ⁻}` is the target network. If `s'` is solved, `h=0`.
-3. Minimize `MSE(h_θ(s), y(s))` wrt online network `θ`.
-4. Every `target_sync_every` iters, copy `θ → θ⁻`.
-
-Uses AMP (**bf16**, no GradScaler) + `torch.compile` on the online network for speed. Training keeps `ckpt_latest.pt` up to date and plots the loss curve inline at each checkpoint.
-
-> **Notes on the implementation:**
-> - `h_θ(solved) = 0` is enforced by zeroing the target when the *current* state happens to be solved (can happen when a random scramble cancels, e.g. `U U'`).
-> - The target net is **not** compiled: `load_state_dict` on a compiled module is flaky with BN buffers, and the savings from compile on the already-no-grad target path are small.
-> - bf16 instead of fp16 because early-training `h` can be large enough to overflow fp16's 65504 ceiling in `1 + h`.
+每步：扰动 → target 网给所有 12 个子状态估代价 → `y = min_a(1 + h(s'))` → MSE 回归 → 周期同步 target。AMP 用 bf16（fp16 早期会溢出）。
 """)
 
 code("""import time
@@ -565,11 +510,9 @@ print(f"saved deepcube_cube3.pt  ({elapsed_total / 60:.1f} min total)")
 """)
 
 # ----------------------------------------------------------------------
-md("""## 7. End-to-end sanity: greedy rollout
+md("""## 7. 端到端验证：贪心求解
 
-Loads the trained net and greedily picks the action with lowest estimated cost-to-go. Works for short scrambles even with a weak heuristic — if this fails on 3-step scrambles, training didn't converge.
-
-**Note:** full-strength solving uses **Batch-Weighted A\\*** (BWAS), which is in the local inference repo, not here — this is only a sanity check.
+用贪心策略（每步选 `h` 最小的动作）在浅扰动上跑一下，验证网络学到了有效的启发式。完整的 BWAS 求解器在本地推理栈里，这里只是 sanity check。
 """)
 
 code("""@torch.no_grad()
@@ -614,12 +557,12 @@ print(f"\\n{successes}/18 greedy solves succeeded")
 # ----------------------------------------------------------------------
 md("""---
 
-## Done
+## 完成
 
-- Final weights saved at `deepcube_cube3.pt`.
-- Right-click in the Jupyter file browser → **Download** to pull it to your local machine.
-- Put it in the local repo at `checkpoints/deepcube_cube3.pt` — the inference server will pick it up from there.
-- You can now destroy the Vast.ai instance.
+- 最终权重在 `deepcube_cube3.pt`
+- Jupyter 文件栏右键 → **Download** 下载到本地
+- 放到仓库的 `checkpoints/deepcube_cube3.pt`，推理服务器会自动加载
+- 可以销毁 Colab / Vast.ai 实例了
 """)
 
 # ----------------------------------------------------------------------
