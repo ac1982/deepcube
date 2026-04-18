@@ -1,5 +1,7 @@
 # DeepCubeA — PyTorch reimplementation
 
+> 🌐 English · [简体中文](README.zh.md)
+
 A clean-room reimplementation of **DeepCubeA** (Agostinelli et al., *Nature Machine Intelligence* 2019) for the 3×3 Rubik's cube, in modern PyTorch + Python 3.12. Reference: [yeates/deepcube-full](https://github.com/yeates/deepcube-full) (original, TF1/Keras era).
 
 The project is split into two sides:
