@@ -19,8 +19,8 @@
   * { box-sizing: border-box; }
   html, body { margin: 0; padding: 0; height: 100%; background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
   #app { display: flex; height: 100vh; }
-  #canvas-wrap { flex: 1; position: relative; }
-  #canvas-wrap canvas { display: block; width: 100%; height: 100%; }
+  #canvas-wrap { flex: 1; position: relative; overflow: hidden; }
+  #canvas-wrap canvas { display: block; width: 100%; height: 100%; transition: opacity .35s ease, filter .35s ease; }
   aside#sidebar {
     width: 340px; padding: 20px; border-left: 1px solid var(--border); background: var(--panel);
     display: flex; flex-direction: column; gap: 18px; overflow-y: auto;
@@ -40,16 +40,66 @@
   button:disabled { background: #2a2f3a; color: var(--muted); cursor: not-allowed; }
   button.secondary { background: transparent; border: 1px solid var(--border); color: var(--text); }
   button.editing { background: var(--warn); color: #241700; }
-  #canvas-wrap.editing { cursor: crosshair; box-shadow: inset 0 0 0 2px var(--warn); }
   .hint { font-size: 12px; color: var(--muted); margin-top: 6px; line-height: 1.5; }
   .hint.active { color: var(--warn); }
-  .flash { animation: flash 0.4s ease-out; }
-  @keyframes flash { 0% { background: rgba(232,93,93,0.4); } 100% { background: transparent; } }
   .solver-choice { display: flex; flex-direction: column; gap: 6px; margin-bottom: 10px; }
   .solver-opt { display: flex; gap: 8px; align-items: flex-start; font-size: 12px; line-height: 1.4; cursor: pointer; }
   .solver-opt.disabled { opacity: 0.4; cursor: not-allowed; }
   .solver-opt input[type=radio] { margin-top: 3px; accent-color: var(--accent); }
   .solver-opt code { background: var(--bg); padding: 1px 4px; border-radius: 3px; font-size: 11px; }
+
+  /* ---- 2D unfold editor overlay ---- */
+  #canvas-wrap.editing canvas { opacity: 0; filter: blur(6px); }
+  #edit-overlay {
+    position: absolute; inset: 0;
+    display: none;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 18px;
+    padding: 20px;
+    opacity: 0;
+    transform: scale(.92);
+    transition: opacity .35s ease, transform .45s cubic-bezier(0.2, 0.9, 0.3, 1.15);
+  }
+  #edit-overlay.open { display: flex; opacity: 1; transform: scale(1); }
+  #edit-overlay .edit-title { font-size: 13px; color: var(--muted); letter-spacing: 0.06em; text-transform: uppercase; }
+  .net {
+    display: grid;
+    grid-template-columns: repeat(12, var(--cell, 32px));
+    grid-template-rows: repeat(9, var(--cell, 32px));
+    gap: 2px;
+  }
+  .net .sticker {
+    border-radius: 4px;
+    border: 1px solid rgba(0,0,0,0.35);
+    cursor: pointer;
+    transition: transform .08s ease, box-shadow .12s ease;
+    position: relative;
+  }
+  .net .sticker:hover { transform: scale(1.08); box-shadow: 0 0 0 2px var(--accent); z-index: 1; }
+  .net .sticker.center { cursor: not-allowed; border-width: 2px; }
+  .net .sticker.center:hover { transform: none; box-shadow: inset 0 0 0 2px rgba(0,0,0,0.3); }
+  .net .sticker.center::after {
+    content: attr(data-letter);
+    position: absolute;
+    inset: 0; display: flex; align-items: center; justify-content: center;
+    color: rgba(0,0,0,0.5); font-weight: 700; font-size: calc(var(--cell, 32px) * 0.45); user-select: none;
+  }
+  #palette {
+    display: flex; gap: 8px; align-items: center;
+    background: var(--panel); padding: 8px 12px; border-radius: 10px; border: 1px solid var(--border);
+  }
+  #palette .pigment {
+    width: 30px; height: 30px; padding: 0; border-radius: 6px;
+    border: 2px solid transparent; cursor: pointer;
+    position: relative;
+    color: rgba(0,0,0,0.5); font-weight: 700; font-size: 13px;
+  }
+  #palette .pigment.selected { border-color: var(--accent); box-shadow: 0 0 0 2px rgba(94,174,255,0.3); }
+  #palette-label { font-size: 12px; color: var(--muted); margin-right: 6px; }
+  #edit-controls { display: flex; gap: 10px; }
+  #edit-controls button { padding: 8px 20px; width: auto; }
   .stats { font-size: 12px; color: var(--muted); line-height: 1.7; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
   .stats b { color: var(--text); font-weight: 500; }
   .badge { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 11px; font-weight: 600; }
@@ -63,7 +113,19 @@
 </head>
 <body>
 <div id="app">
-  <div id="canvas-wrap"></div>
+  <div id="canvas-wrap">
+    <div id="edit-overlay">
+      <div class="edit-title">编辑模式 · 选颜色 → 点格子</div>
+      <div id="net" class="net"></div>
+      <div id="palette">
+        <span id="palette-label">笔刷</span>
+      </div>
+      <div id="edit-controls">
+        <button id="editDoneBtn">完成并返回 3D</button>
+        <button id="editCancelBtn" class="secondary">放弃，回到还原状态</button>
+      </div>
+    </div>
+  </div>
   <aside id="sidebar">
     <div>
       <h1>DeepCubeA</h1>
@@ -83,10 +145,11 @@
 
     <section>
       <h2>录入你手里的魔方</h2>
-      <button id="editBtn" class="secondary">编辑模式 — 对齐实体魔方</button>
+      <button id="editBtn" class="secondary">编辑模式 — 2D 展开图</button>
       <div id="editHint" class="hint">
-        点进入编辑模式后，魔方会先回到还原状态。然后点击任意<b>非中心</b>小格，
-        颜色依次循环 U / F / R / B / L / D。拖拽可以旋转视角；中心贴纸固定不可改。
+        点开进入 2D 十字展开视图。先在调色板里选一个颜色，
+        然后点格子直接上色（1 次点击 = 1 格），中心贴纸锁定。
+        完成后点 <b>完成并返回 3D</b>。
       </div>
     </section>
 
@@ -246,6 +309,7 @@ render();
 let busy = false;
 let editMode = false;
 let modelLoaded = false;
+let selectedBrush = 0;     // 0..5, which color clicking a sticker paints
 
 function animateRotation(pivot, axisVec, targetAngle, duration) {
   return new Promise(resolve => {
@@ -337,7 +401,7 @@ function updateButtons() {
   $('solveBtn').disabled   = busy || editMode || !solveOk;
   $('resetBtn').disabled   = busy || editMode;
   $('editBtn').disabled    = busy;
-  $('editBtn').textContent = editMode ? '退出编辑模式' : '编辑模式 — 对齐实体魔方';
+  $('editBtn').textContent = editMode ? '退出编辑模式' : '编辑模式 — 2D 展开图';
   $('editBtn').classList.toggle('editing', editMode);
   document.getElementById('canvas-wrap').classList.toggle('editing', editMode);
   $('editHint').classList.toggle('active', editMode);
@@ -350,13 +414,16 @@ function setBusy(b) { busy = b; updateButtons(); }
 function setStats(html) { $('solveStats').innerHTML = html; }
 function setMoves(html) { $('solveMoves').innerHTML = html; }
 
-function doReset() {
+function disposeCubies() {
   for (const c of cubies) {
     cubeGroup.remove(c);
     c.geometry.dispose();
     for (const m of c.material) m.dispose();
   }
   cubies.length = 0;
+}
+
+function buildCubiesAtSolved() {
   for (let x = -1; x <= 1; x++)
     for (let y = -1; y <= 1; y++)
       for (let z = -1; z <= 1; z++)
@@ -365,9 +432,38 @@ function doReset() {
           cubeGroup.add(c);
           cubies.push(c);
         }
+}
+
+// After editing, rebuild cubies so their face materials match the current
+// (arbitrary) state array. Each cubie's outward face reads its sticker's
+// color from `state`; inward faces stay black. All cubies return to the
+// identity orientation on the lattice.
+function buildCubiesFromState() {
+  const faces = [[0,+1],[0,-1],[1,+1],[1,-1],[2,+1],[2,-1]];
+  for (let x = -1; x <= 1; x++) for (let y = -1; y <= 1; y++) for (let z = -1; z <= 1; z++) {
+    if (x === 0 && y === 0 && z === 0) continue;
+    const g = new THREE.BoxGeometry(CUBIE_SIZE, CUBIE_SIZE, CUBIE_SIZE);
+    const mats = faces.map(([axis, sign]) => {
+      const onFace = (axis === 0 && x === sign) || (axis === 1 && y === sign) || (axis === 2 && z === sign);
+      if (!onFace) return new THREE.MeshLambertMaterial({ color: COLORS.interior });
+      const normal = [axis === 0 ? sign : 0, axis === 1 ? sign : 0, axis === 2 ? sign : 0];
+      const idx = stickerLookup.get(stickerKey([x, y, z], normal));
+      return new THREE.MeshLambertMaterial({ color: COLORS[state[idx]] });
+    });
+    const m = new THREE.Mesh(g, mats);
+    m.position.set(x * CUBIE_SPACING, y * CUBIE_SPACING, z * CUBIE_SPACING);
+    cubeGroup.add(m);
+    cubies.push(m);
+  }
+}
+
+function doReset() {
+  disposeCubies();
   state = new Int8Array(solvedState);
+  buildCubiesAtSolved();
   setStats('');
   setMoves('');
+  if (editMode) render2DNet();
 }
 
 async function refreshHealth() {
@@ -407,70 +503,71 @@ async function bootstrap() {
   await refreshHealth();
 }
 
-// ---- edit-mode raycast click-to-cycle ----
-const raycaster = new THREE.Raycaster();
-const pointer = new THREE.Vector2();
-let pointerDownAt = null;   // {x, y, t} or null
+// ---- 2D unfold editor ----
 
-function onPointerDown(e) {
-  if (!editMode) return;
-  pointerDownAt = { x: e.clientX, y: e.clientY, t: performance.now() };
-}
-
-function onPointerUp(e) {
-  if (!editMode || !pointerDownAt) return;
-  const dx = e.clientX - pointerDownAt.x;
-  const dy = e.clientY - pointerDownAt.y;
-  const dt = performance.now() - pointerDownAt.t;
-  pointerDownAt = null;
-  // Drag threshold: small movement + short hold = click; otherwise it's a
-  // view-rotation gesture that OrbitControls has already consumed.
-  if (Math.sqrt(dx * dx + dy * dy) > 5 || dt > 350) return;
-  handleStickerClick(e);
-}
-
-function handleStickerClick(e) {
-  const rect = renderer.domElement.getBoundingClientRect();
-  pointer.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
-  pointer.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
-  raycaster.setFromCamera(pointer, camera);
-  const hits = raycaster.intersectObjects(cubies, false);
-  if (!hits.length) return;
-  const hit = hits[0];
-  const cubie = hit.object;
-
-  // Cubie world position rounds to integer {-1, 0, 1} when the cube sits
-  // on its lattice (guaranteed outside of a running animation, and we lock
-  // edit toggle during busy).
-  const wp = new THREE.Vector3();
-  cubie.getWorldPosition(wp);
-  const cubiePos = [Math.round(wp.x), Math.round(wp.y), Math.round(wp.z)];
-
-  // face.normal is in the cubie's local frame; transform to world.
-  const worldNormal = hit.face.normal.clone().transformDirection(cubie.matrixWorld);
-  const n = [Math.round(worldNormal.x), Math.round(worldNormal.y), Math.round(worldNormal.z)];
-
-  const idx = stickerLookup.get(stickerKey(cubiePos, n));
-  if (idx === undefined) return;   // raycast hit something we can't map — skip
-  if (centerSet.has(idx)) {
-    // Centers are fixed by the U/F/R/B/L/D orientation convention.
-    flashReject();
-    setStats('<span style="color: var(--warn)">中心贴纸不可修改——它们定义了魔方的朝向</span>');
-    return;
+// Grid position (row, col) in the 12x9 cross net, keyed by sticker index.
+// Face order on the net:
+//         [ U ]
+//   [ L ][ F ][ R ][ B ]
+//         [ D ]
+function stickerGridPos(idx) {
+  const face = Math.floor(idx / 9);   // 0=U 1=F 2=R 3=B 4=L 5=D
+  const within = idx % 9;
+  const wr = Math.floor(within / 3), wc = within % 3;
+  switch (face) {
+    case 0: return [wr,       3 + wc];    // U
+    case 1: return [3 + wr,   3 + wc];    // F
+    case 2: return [3 + wr,   6 + wc];    // R
+    case 3: return [3 + wr,   9 + wc];    // B
+    case 4: return [3 + wr,   0 + wc];    // L
+    case 5: return [6 + wr,   3 + wc];    // D
   }
+}
+const FACE_LETTERS = ['U', 'F', 'R', 'B', 'L', 'D'];
 
-  // Cycle 0..5 then wrap.
-  state[idx] = (state[idx] + 1) % 6;
-  const mat = Array.isArray(cubie.material) ? cubie.material[hit.face.materialIndex] : cubie.material;
-  mat.color.setHex(EDIT_COLOR_ORDER[state[idx]]);
-  setStats('');
+function render2DNet() {
+  const net = document.getElementById('net');
+  net.innerHTML = '';
+  for (let i = 0; i < 54; i++) {
+    const [row, col] = stickerGridPos(i);
+    const d = document.createElement('div');
+    d.className = 'sticker' + (centerSet.has(i) ? ' center' : '');
+    d.style.gridRow = (row + 1).toString();
+    d.style.gridColumn = (col + 1).toString();
+    d.style.backgroundColor = '#' + COLORS[state[i]].toString(16).padStart(6, '0');
+    d.dataset.idx = i;
+    if (centerSet.has(i)) {
+      const face = Math.floor(i / 9);
+      d.dataset.letter = FACE_LETTERS[face];
+    } else {
+      d.addEventListener('click', onStickerClick);
+    }
+    net.appendChild(d);
+  }
 }
 
-function flashReject() {
-  const el = document.getElementById('canvas-wrap');
-  el.classList.remove('flash');
-  void el.offsetWidth;  // retrigger
-  el.classList.add('flash');
+function onStickerClick(e) {
+  const idx = parseInt(e.currentTarget.dataset.idx, 10);
+  state[idx] = selectedBrush;
+  e.currentTarget.style.backgroundColor = '#' + COLORS[selectedBrush].toString(16).padStart(6, '0');
+}
+
+function buildPalette() {
+  const p = document.getElementById('palette');
+  // Label already exists. Append 6 color buttons.
+  for (let c = 0; c < 6; c++) {
+    const b = document.createElement('button');
+    b.className = 'pigment' + (c === selectedBrush ? ' selected' : '');
+    b.style.backgroundColor = '#' + COLORS[c].toString(16).padStart(6, '0');
+    b.textContent = FACE_LETTERS[c];
+    b.dataset.color = c;
+    b.title = `${FACE_LETTERS[c]} 面颜色`;
+    b.addEventListener('click', () => {
+      selectedBrush = c;
+      for (const el of p.querySelectorAll('.pigment')) el.classList.toggle('selected', Number(el.dataset.color) === c);
+    });
+    p.appendChild(b);
+  }
 }
 
 // Validate an edited state before sending to /solve. Catches the obvious
@@ -497,8 +594,7 @@ function validateState() {
   return null;
 }
 
-renderer.domElement.addEventListener('pointerdown', onPointerDown);
-renderer.domElement.addEventListener('pointerup', onPointerUp);
+buildPalette();
 
 $('scrambleBtn').onclick = async () => {
   if (busy) return;
@@ -566,19 +662,31 @@ $('resetBtn').onclick = () => {
   doReset();
 };
 
+function enterEditMode() {
+  editMode = true;
+  render2DNet();
+  document.getElementById('edit-overlay').classList.add('open');
+  setStats('');
+  updateButtons();
+}
+
+function exitEditMode({ reset = false } = {}) {
+  if (reset) state = new Int8Array(solvedState);
+  // Rebuild 3D from (possibly edited) state so the cube visually matches.
+  disposeCubies();
+  buildCubiesFromState();
+  editMode = false;
+  document.getElementById('edit-overlay').classList.remove('open');
+  updateButtons();
+}
+
 $('editBtn').onclick = () => {
   if (busy) return;
-  editMode = !editMode;
-  if (editMode) {
-    // Edit only makes sense from the solved/identity orientation — otherwise
-    // rotated cubies confuse the sticker lookup. Auto-reset on enter.
-    doReset();
-    setStats('<span style="color: var(--accent)">编辑中——点击小格循环切换颜色，拖拽旋转视角</span>');
-  } else {
-    setStats('');
-  }
-  updateButtons();
+  if (editMode) exitEditMode();
+  else enterEditMode();
 };
+$('editDoneBtn').onclick = () => exitEditMode();
+$('editCancelBtn').onclick = () => exitEditMode({ reset: true });
 
 bootstrap().catch(e => {
   const el = $('health'); el.className = 'badge bad'; el.textContent = '初始化失败';
