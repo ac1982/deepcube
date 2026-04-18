@@ -173,7 +173,7 @@
   <aside id="sidebar">
     <div>
       <h1>DeepCubeA</h1>
-      <div class="sub">PyTorch 重写版 · 3×3 魔方</div>
+      <div class="sub">输入你的魔方 → 看每一步怎么拧</div>
       <div id="health" class="badge warn">检查中…</div>
     </div>
 
@@ -202,11 +202,11 @@
       <div class="solver-choice">
         <label class="solver-opt">
           <input type="radio" name="solver" value="kociemba" checked />
-          <span><b>Kociemba</b> — 两阶段算法，毫秒级，HTM 最优</span>
+          <span><b>Kociemba</b>（默认）— 最短步数</span>
         </label>
         <label class="solver-opt" id="deepcubeOpt">
           <input type="radio" name="solver" value="deepcube" />
-          <span><b>DeepCubeA</b> — 习得启发式 + A<sup>*</sup>，需要训练好的 <code>.pt</code></span>
+          <span><b>DeepCubeA</b> — AI 求解，需要训练后的模型</span>
         </label>
       </div>
       <label id="lambdaRow" style="display:none;">
@@ -252,9 +252,9 @@
           <span>Down 底面</span>
         </div>
         <div class="stats" style="margin-top: 10px;">
-          <b>X</b>&nbsp;顺时针 90°（俯视该面）<br>
-          <b>X'</b>&nbsp;逆时针 90°（<code>'</code> 表示反向）<br>
-          <b>X2</b>&nbsp;180°（等价于 X X）
+          <b>R</b>&nbsp;那一面顺时针转 90°（当你<b>正对着那一面看</b>）<br>
+          <b>R'</b>&nbsp;逆时针 90°（<code>'</code> 读作 "prime"，就是"反过来"）<br>
+          <b>R2</b>&nbsp;同一面转半圈（180°，相当于 <code>R R</code>）
         </div>
         <div class="stats" style="margin-top: 8px;">
           拧实体魔方时按<b>白面朝上、绿面朝你</b>的方向持握，然后按公式从左到右依次执行即可还原。
@@ -263,14 +263,23 @@
     </section>
 
     <section>
-      <h2>工作原理</h2>
+      <h2>关于</h2>
       <div class="stats">
-        <b>打乱</b>——向服务器请求一串随机动作，并在魔方上动画播放。<br><br>
-        <b>求解</b>——把当前 54 格状态发给服务器。
-        Kociemba 走两阶段 IDA\* + 查表，毫秒返回；
-        DeepCubeA 用训练好的神经网络启发式 + <b>Batch-Weighted A\*</b> 搜索。
-        <b>λ</b> 只影响 DeepCubeA：1 = 最优 A*，越大越贪心（更快但不一定最短）。<br><br>
-        <b>度量:</b> QTM 只算 90° 转；HTM 把 180°（如 U2）算作 1 步。
+        本项目用 <b>PyTorch</b> 重写了 DeepCubeA（Agostinelli 2019 提出的
+        深度强化学习魔方解算器）。同时也集成了更快的 Kociemba
+        两阶段算法作为对照。你现在看到的界面只是个演示前端——
+        真正有意思的是训练神经网络<i>自学</i>出一个和 Kociemba 类似好的
+        求解策略。<br><br>
+        技术细节见 <a href="https://github.com/ac1982/deepcube"
+          target="_blank" rel="noopener" style="color: var(--accent);">GitHub 仓库</a>。
+        <br><br>
+        <details style="margin-top: 6px;">
+          <summary style="cursor:pointer; color: var(--muted);">度量说明 QTM / HTM</summary>
+          <div style="margin-top: 6px;">
+            <b>QTM</b>：只算 90° 转。<code>U2</code> 算 2 步。<br>
+            <b>HTM</b>：把半圈 <code>U2</code> 算 1 步。更符合人拧魔方的直觉。
+          </div>
+        </details>
       </div>
     </section>
   </aside>
