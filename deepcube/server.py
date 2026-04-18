@@ -35,7 +35,17 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from deepcube.cube3 import MOVE_PERMS, MOVES, N_MOVES, N_STICKERS, SOLVED, apply_move, scramble
+from deepcube.cube3 import (
+    CENTER_INDICES,
+    MOVE_PERMS,
+    MOVES,
+    N_MOVES,
+    N_STICKERS,
+    SOLVED,
+    apply_move,
+    scramble,
+    sticker_layout,
+)
 from deepcube.model import DeepCubeANet, load_checkpoint
 from deepcube.search import bwas_solve
 
@@ -97,6 +107,12 @@ class MetaResponse(BaseModel):
     moves: list[str]
     move_perms: list[list[int]]
     solved_state: list[int]
+    # For edit-mode raycast -> sticker-index lookup. sticker_positions[i] and
+    # sticker_normals[i] are the (cubie_position, outward_normal) pair of
+    # sticker i, each a list of 3 ints in {-1, 0, 1}.
+    sticker_positions: list[list[int]]
+    sticker_normals: list[list[int]]
+    center_indices: list[int]
 
 
 # ---------------------------------------------------------------------------
@@ -144,12 +160,16 @@ def healthz() -> HealthResponse:
 
 @app.get("/meta", response_model=MetaResponse)
 def meta() -> MetaResponse:
+    layout = sticker_layout()
     return MetaResponse(
         n_stickers=N_STICKERS,
         n_moves=N_MOVES,
         moves=MOVES,
         move_perms=MOVE_PERMS.tolist(),
         solved_state=SOLVED.tolist(),
+        sticker_positions=[list(pos) for pos, _ in layout],
+        sticker_normals=[list(nor) for _, nor in layout],
+        center_indices=list(CENTER_INDICES),
     )
 
 

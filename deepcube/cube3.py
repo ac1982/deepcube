@@ -32,6 +32,7 @@ __all__ = [
     "SOLVED",
     "MOVES",
     "MOVE_PERMS",
+    "CENTER_INDICES",
     "apply_move",
     "scramble",
     "batch_scramble",
@@ -40,6 +41,7 @@ __all__ = [
     "inverse_move",
     "parse_moves",
     "format_moves",
+    "sticker_layout",
 ]
 
 N_STICKERS = 54
@@ -142,6 +144,12 @@ def _build_perm(layer_axis: int, layer_value: int, rot_axis: int, sign: int) -> 
 MOVE_PERMS: np.ndarray = np.stack([_build_perm(*_MOVE_SPECS[m]) for m in MOVES])
 assert MOVE_PERMS.shape == (N_MOVES, N_STICKERS)
 
+# One sticker per face is a center cubie (the cubie at, say, (0, 1, 0) for U).
+# In solved state the sticker there has color = face index; we hard-lock it in
+# the UI's edit mode so the user can't paint over the convention.
+CENTER_INDICES: list[int] = [4, 13, 22, 31, 40, 49]
+assert all(SOLVED[i] == face for face, i in enumerate(CENTER_INDICES))
+
 
 # ---------------------------------------------------------------------------
 # Public API
@@ -241,3 +249,13 @@ def parse_moves(text: str) -> list[int]:
 def format_moves(indices: list[int]) -> str:
     """Format a move index sequence as a human-readable string."""
     return " ".join(MOVES[i] for i in indices)
+
+
+def sticker_layout() -> list[tuple[tuple[int, int, int], tuple[int, int, int]]]:
+    """For each sticker index 0..53, return its (cubie_position, outward_normal).
+
+    Exposed so the frontend can build a `(cubie_position, normal) -> sticker_idx`
+    lookup for click-to-edit mode without having to re-implement the layout
+    logic in JavaScript.
+    """
+    return list(_STICKER_INFO)

@@ -51,6 +51,21 @@ def test_meta_shape(client: TestClient):
     # Each perm is a bijection on 0..53
     for p in body["move_perms"]:
         assert sorted(p) == list(range(54))
+    # Sticker layout
+    assert len(body["sticker_positions"]) == 54
+    assert len(body["sticker_normals"]) == 54
+    assert all(len(p) == 3 for p in body["sticker_positions"])
+    assert all(len(n) == 3 for n in body["sticker_normals"])
+    # Centers: 6 indices, each paired with a positive center-sticker color
+    assert len(body["center_indices"]) == 6
+    for face, idx in enumerate(body["center_indices"]):
+        assert body["solved_state"][idx] == face
+    # (position, normal) pairs must be unique — they're the raycast lookup key.
+    seen = set()
+    for p, n in zip(body["sticker_positions"], body["sticker_normals"], strict=True):
+        key = (tuple(p), tuple(n))
+        assert key not in seen, f"duplicate sticker layout entry: {key}"
+        seen.add(key)
 
 
 def test_healthz_shape(client: TestClient):
