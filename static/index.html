@@ -108,6 +108,25 @@
   /* Keep the overlay's interactive children stacked above the blurred canvas
      regardless of how the browser resolves auto z-index. */
   #net, #palette, #edit-controls, .edit-title { position: relative; z-index: 1; }
+
+  .notation { font-size: 12px; color: var(--muted); line-height: 1.5; }
+  .notation-row { display: grid; grid-template-columns: auto 1fr auto 1fr; gap: 6px 10px; align-items: center; margin-bottom: 6px; }
+  .face-chip {
+    display: inline-flex; width: 24px; height: 24px; border-radius: 5px;
+    background: var(--c); color: inherit;
+    align-items: center; justify-content: center;
+    font-weight: 700; font-size: 13px;
+    border: 1px solid rgba(0,0,0,0.25);
+  }
+  .moves code.htm {
+    color: var(--text); font-size: 13px; line-height: 1.8; letter-spacing: 0.01em;
+  }
+  .moves .qtm-toggle {
+    display: inline-block; cursor: pointer; color: var(--accent); font-size: 11px;
+    margin-top: 6px; text-decoration: underline dotted;
+  }
+  .moves .qtm-raw { display: none; color: var(--muted); font-size: 11px; margin-top: 4px; }
+  .moves.show-qtm .qtm-raw { display: block; }
   .stats { font-size: 12px; color: var(--muted); line-height: 1.7; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
   .stats b { color: var(--text); font-weight: 500; }
   .badge { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 11px; font-weight: 600; }
@@ -184,6 +203,38 @@
       </div>
       <div id="solveStats" class="stats" style="margin-top: 10px;"></div>
       <div id="solveMoves" class="moves"></div>
+    </section>
+
+    <section>
+      <h2>公式说明</h2>
+      <div class="notation">
+        <div class="notation-row">
+          <span class="face-chip" style="--c:#f5f5f5;color:#222">U</span>
+          <span>Up 顶面</span>
+          <span class="face-chip" style="--c:#2ecc40;color:#0a1a0a">F</span>
+          <span>Front 正面（对着你）</span>
+        </div>
+        <div class="notation-row">
+          <span class="face-chip" style="--c:#ff4136;color:#fff">R</span>
+          <span>Right 右面</span>
+          <span class="face-chip" style="--c:#0074d9;color:#fff">B</span>
+          <span>Back 后面</span>
+        </div>
+        <div class="notation-row">
+          <span class="face-chip" style="--c:#ff851b;color:#fff">L</span>
+          <span>Left 左面</span>
+          <span class="face-chip" style="--c:#ffdc00;color:#222">D</span>
+          <span>Down 底面</span>
+        </div>
+        <div class="stats" style="margin-top: 10px;">
+          <b>X</b>&nbsp;顺时针 90°（俯视该面）<br>
+          <b>X'</b>&nbsp;逆时针 90°（<code>'</code> 表示反向）<br>
+          <b>X2</b>&nbsp;180°（等价于 X X）
+        </div>
+        <div class="stats" style="margin-top: 8px;">
+          拧实体魔方时按<b>白面朝上、绿面朝你</b>的方向持握，然后按公式从左到右依次执行即可还原。
+        </div>
+      </div>
     </section>
 
     <section>
@@ -380,6 +431,33 @@ function applyPerm(s, perm) {
 function statesEqual(a, b) {
   for (let i = 0; i < 54; i++) if (a[i] !== b[i]) return false;
   return true;
+}
+
+// Fold consecutive duplicates ("R R" or "R' R'" — both equal X2) into X2.
+// We keep the server's QTM path for animation (which only knows 90° turns)
+// but show humans the compact form.
+function qtmToHtm(moves) {
+  const out = [];
+  for (let i = 0; i < moves.length; i++) {
+    if (i + 1 < moves.length && moves[i] === moves[i + 1]) {
+      out.push(moves[i].replace("'", "") + "2");
+      i++;
+    } else {
+      out.push(moves[i]);
+    }
+  }
+  return out;
+}
+
+function formatMovesPretty(moves) {
+  const htm = qtmToHtm(moves);
+  // Wrap every 8 moves onto a new line so long solves stay readable.
+  const lines = [];
+  for (let i = 0; i < htm.length; i += 8) lines.push(htm.slice(i, i + 8).join(' '));
+  const htmBlock = `<code class="htm">${lines.join('<br>')}</code>`;
+  return `${htmBlock}
+    <span class="qtm-toggle" onclick="this.parentElement.classList.toggle('show-qtm')">显示 QTM 展开</span>
+    <div class="qtm-raw">${moves.join(' ')}</div>`;
 }
 
 // ---- DOM wiring ----
@@ -660,7 +738,7 @@ $('solveBtn').onclick = async () => {
       setStats(
         `<b>${r.solver}</b> 用 ${r.path_length} QTM${htm} 求解${nodes} · ${r.elapsed_sec.toFixed(3)}s`
       );
-      setMoves(r.moves.join(' '));
+      setMoves(formatMovesPretty(r.moves));
     } else {
       setStats(`<span style="color: var(--warn)">${r.solver} 停止：${r.stop_reason}` +
                ` · ${r.elapsed_sec.toFixed(3)}s</span>`);
