@@ -199,11 +199,10 @@ def batch_scramble(B: int, max_k: int, rng):
 
     Returns (states: (B,54) int8, ks: (B,) int64).\"\"\"
     ks = rng.integers(1, max_k + 1, size=B)
-    max_total = int(ks.max())
     states = np.tile(SOLVED, (B, 1))
-    moves = rng.integers(0, 12, size=(B, max_total))
+    moves = rng.integers(0, 12, size=(B, max_k))
     idx_b = np.arange(B)[:, None]
-    for t in range(max_total):
+    for t in range(max_k):
         perms = MOVE_PERMS[moves[:, t]]            # (B, 54)
         new = states[idx_b, perms]                 # (B, 54)
         active = (t < ks)[:, None]
