@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>DeepCubeA — 3×3 solver</title>
+<title>DeepCubeA — 3×3 魔方求解器</title>
 <style>
   :root {
     --bg: #0f1115;
@@ -67,40 +67,39 @@
   <aside id="sidebar">
     <div>
       <h1>DeepCubeA</h1>
-      <div class="sub">PyTorch reimplementation · 3×3 Rubik's cube</div>
-      <div id="health" class="badge warn">checking…</div>
+      <div class="sub">PyTorch 重写版 · 3×3 魔方</div>
+      <div id="health" class="badge warn">检查中…</div>
     </div>
 
     <section>
-      <h2>Scramble</h2>
+      <h2>打乱</h2>
       <label>
-        <span style="width: 60px;">depth</span>
+        <span style="width: 60px;">步数</span>
         <input type="range" id="depth" min="1" max="30" value="15" />
         <input type="number" id="depthNum" min="1" max="30" value="15" />
       </label>
-      <button id="scrambleBtn">Scramble</button>
+      <button id="scrambleBtn">随机打乱</button>
     </section>
 
     <section>
-      <h2>Enter your cube</h2>
-      <button id="editBtn" class="secondary">Edit mode — match physical cube</button>
+      <h2>录入你手里的魔方</h2>
+      <button id="editBtn" class="secondary">编辑模式 — 对齐实体魔方</button>
       <div id="editHint" class="hint">
-        Tap to enter edit mode. The cube will reset to solved, then you click any
-        non-center sticker to cycle its color through U / F / R / B / L / D. Drag
-        to rotate the view; centers are locked.
+        点进入编辑模式后，魔方会先回到还原状态。然后点击任意<b>非中心</b>小格，
+        颜色依次循环 U / F / R / B / L / D。拖拽可以旋转视角；中心贴纸固定不可改。
       </div>
     </section>
 
     <section>
-      <h2>Solve</h2>
+      <h2>求解</h2>
       <div class="solver-choice">
         <label class="solver-opt">
           <input type="radio" name="solver" value="kociemba" checked />
-          <span><b>Kociemba</b> — two-phase, ms-fast, optimal in HTM</span>
+          <span><b>Kociemba</b> — 两阶段算法，毫秒级，HTM 最优</span>
         </label>
         <label class="solver-opt" id="deepcubeOpt">
           <input type="radio" name="solver" value="deepcube" />
-          <span><b>DeepCubeA</b> — learned heuristic + A<sup>*</sup>, needs a trained <code>.pt</code></span>
+          <span><b>DeepCubeA</b> — 习得启发式 + A<sup>*</sup>，需要训练好的 <code>.pt</code></span>
         </label>
       </div>
       <label id="lambdaRow" style="display:none;">
@@ -109,22 +108,22 @@
         <span id="lambdaVal" style="font-family: ui-monospace, monospace; font-size: 12px;">2.0</span>
       </label>
       <div class="row">
-        <button id="solveBtn">Solve</button>
-        <button id="resetBtn" class="secondary">Reset</button>
+        <button id="solveBtn">开始求解</button>
+        <button id="resetBtn" class="secondary">重置</button>
       </div>
       <div id="solveStats" class="stats" style="margin-top: 10px;"></div>
       <div id="solveMoves" class="moves"></div>
     </section>
 
     <section>
-      <h2>How it works</h2>
+      <h2>工作原理</h2>
       <div class="stats">
-        <b>Scramble</b> asks the server for a random sequence of moves and
-        animates them on the cube.<br><br>
-        <b>Solve</b> sends the current 54-sticker state to the server, which
-        runs <b>Batch-Weighted A\*</b> with the trained neural heuristic to
-        find a move sequence back to solved. <b>λ</b> trades optimality for
-        speed (1 = optimal A*, higher = greedier).
+        <b>打乱</b>——向服务器请求一串随机动作，并在魔方上动画播放。<br><br>
+        <b>求解</b>——把当前 54 格状态发给服务器。
+        Kociemba 走两阶段 IDA\* + 查表，毫秒返回；
+        DeepCubeA 用训练好的神经网络启发式 + <b>Batch-Weighted A\*</b> 搜索。
+        <b>λ</b> 只影响 DeepCubeA：1 = 最优 A*，越大越贪心（更快但不一定最短）。<br><br>
+        <b>度量:</b> QTM 只算 90° 转；HTM 把 180°（如 U2）算作 1 步。
       </div>
     </section>
   </aside>
@@ -338,7 +337,7 @@ function updateButtons() {
   $('solveBtn').disabled   = busy || editMode || !solveOk;
   $('resetBtn').disabled   = busy || editMode;
   $('editBtn').disabled    = busy;
-  $('editBtn').textContent = editMode ? 'Exit edit mode' : 'Edit mode — match physical cube';
+  $('editBtn').textContent = editMode ? '退出编辑模式' : '编辑模式 — 对齐实体魔方';
   $('editBtn').classList.toggle('editing', editMode);
   document.getElementById('canvas-wrap').classList.toggle('editing', editMode);
   $('editHint').classList.toggle('active', editMode);
@@ -377,14 +376,14 @@ async function refreshHealth() {
     const el = $('health');
     if (r.model_loaded) {
       modelLoaded = true;
-      el.className = 'badge good'; el.textContent = 'model loaded';
+      el.className = 'badge good'; el.textContent = '已加载模型';
     } else {
       modelLoaded = false;
-      el.className = 'badge warn'; el.textContent = 'no model — solve disabled';
+      el.className = 'badge warn'; el.textContent = '未加载模型 — DeepCubeA 不可用';
     }
   } catch (e) {
     modelLoaded = false;
-    const el = $('health'); el.className = 'badge bad'; el.textContent = 'server unreachable';
+    const el = $('health'); el.className = 'badge bad'; el.textContent = '无法连接服务器';
   }
   updateButtons();
 }
@@ -456,7 +455,7 @@ function handleStickerClick(e) {
   if (centerSet.has(idx)) {
     // Centers are fixed by the U/F/R/B/L/D orientation convention.
     flashReject();
-    setStats('<span style="color: var(--warn)">center stickers are fixed — they define the cube orientation</span>');
+    setStats('<span style="color: var(--warn)">中心贴纸不可修改——它们定义了魔方的朝向</span>');
     return;
   }
 
@@ -483,8 +482,8 @@ function validateState() {
   const wrong = counts.map((c, i) => c === 9 ? null : i).filter(x => x !== null);
   if (wrong.length) {
     const names = ['U','F','R','B','L','D'];
-    const details = wrong.map(i => `${names[i]}: ${counts[i]} (expected 9)`).join(', ');
-    return `wrong color counts — ${details}`;
+    const details = wrong.map(i => `${names[i]}: ${counts[i]} 格（应为 9）`).join('，');
+    return `颜色数量不对——${details}`;
   }
   // Server's center_indices comes back in face order 0..5, so
   // state[centerIndices[face]] must equal face.
@@ -492,7 +491,7 @@ function validateState() {
   const names = ['U','F','R','B','L','D'];
   for (let face = 0; face < 6; face++) {
     if (state[centerIdx[face]] !== face) {
-      return `${names[face]} center has color ${names[state[centerIdx[face]]]} (must stay ${names[face]})`;
+      return `${names[face]} 面中心颜色是 ${names[state[centerIdx[face]]]}（必须保持为 ${names[face]}）`;
     }
   }
   return null;
@@ -513,9 +512,9 @@ $('scrambleBtn').onclick = async () => {
     await animateSequence(resp.moves, 120);
     // Sync client state from server (we trust the server's state).
     state = new Int8Array(resp.state);
-    setMoves(`<b>scrambled ${resp.moves.length} moves:</b><br>${resp.moves.join(' ')}`);
+    setMoves(`<b>已打乱 ${resp.moves.length} 步:</b><br>${resp.moves.join(' ')}`);
   } catch (e) {
-    setStats(`<span style="color: var(--bad)">scramble failed: ${e.message}</span>`);
+    setStats(`<span style="color: var(--bad)">打乱失败: ${e.message}</span>`);
   } finally { setBusy(false); }
 };
 
@@ -523,11 +522,11 @@ $('solveBtn').onclick = async () => {
   if (busy || editMode) return;
   const err = validateState();
   if (err) {
-    setStats(`<span style="color: var(--bad)">invalid state — ${err}</span>`);
+    setStats(`<span style="color: var(--bad)">状态非法——${err}</span>`);
     return;
   }
   const solver = selectedSolver();
-  setBusy(true); setStats(`solving with ${solver}…`); setMoves('');
+  setBusy(true); setStats(`${solver} 求解中…`); setMoves('');
   try {
     const body = {
       state: Array.from(state),
@@ -547,18 +546,18 @@ $('solveBtn').onclick = async () => {
       for (const m of r.moves) state = applyPerm(state, movePerms[moveNameToIdx[m]]);
       const htm = r.path_length_htm != null ? ` / ${r.path_length_htm} HTM` : '';
       const nodes = (r.solver === 'deepcube')
-        ? ` · ${r.nodes_expanded.toLocaleString()} expanded · ${r.nodes_generated.toLocaleString()} generated`
+        ? ` · 展开 ${r.nodes_expanded.toLocaleString()} · 生成 ${r.nodes_generated.toLocaleString()}`
         : '';
       setStats(
-        `<b>${r.solver}</b> solved in ${r.path_length} QTM${htm}${nodes} · ${r.elapsed_sec.toFixed(3)}s`
+        `<b>${r.solver}</b> 用 ${r.path_length} QTM${htm} 求解${nodes} · ${r.elapsed_sec.toFixed(3)}s`
       );
       setMoves(r.moves.join(' '));
     } else {
-      setStats(`<span style="color: var(--warn)">${r.solver} stopped: ${r.stop_reason}` +
+      setStats(`<span style="color: var(--warn)">${r.solver} 停止：${r.stop_reason}` +
                ` · ${r.elapsed_sec.toFixed(3)}s</span>`);
     }
   } catch (e) {
-    setStats(`<span style="color: var(--bad)">solve failed: ${e.message}</span>`);
+    setStats(`<span style="color: var(--bad)">求解失败: ${e.message}</span>`);
   } finally { setBusy(false); }
 };
 
@@ -574,7 +573,7 @@ $('editBtn').onclick = () => {
     // Edit only makes sense from the solved/identity orientation — otherwise
     // rotated cubies confuse the sticker lookup. Auto-reset on enter.
     doReset();
-    setStats('<span style="color: var(--accent)">editing — tap a sticker to cycle its color; drag to rotate view</span>');
+    setStats('<span style="color: var(--accent)">编辑中——点击小格循环切换颜色，拖拽旋转视角</span>');
   } else {
     setStats('');
   }
@@ -582,7 +581,7 @@ $('editBtn').onclick = () => {
 };
 
 bootstrap().catch(e => {
-  const el = $('health'); el.className = 'badge bad'; el.textContent = 'bootstrap failed';
+  const el = $('health'); el.className = 'badge bad'; el.textContent = '初始化失败';
   console.error(e);
 });
 </script>
