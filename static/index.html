@@ -49,9 +49,13 @@
   .solver-opt code { background: var(--bg); padding: 1px 4px; border-radius: 3px; font-size: 11px; }
 
   /* ---- 2D unfold editor overlay ---- */
-  #canvas-wrap.editing canvas { opacity: 0; filter: blur(6px); }
+  /* pointer-events:none on the canvas so OrbitControls stops swallowing clicks
+     that are meant for the overlay; without this, the (invisible) canvas still
+     captures pointerdown. */
+  #canvas-wrap.editing canvas { opacity: 0; filter: blur(6px); pointer-events: none; }
   #edit-overlay {
     position: absolute; inset: 0;
+    z-index: 5;
     display: none;
     flex-direction: column;
     align-items: center;
@@ -61,6 +65,7 @@
     opacity: 0;
     transform: scale(.92);
     transition: opacity .35s ease, transform .45s cubic-bezier(0.2, 0.9, 0.3, 1.15);
+    background: rgba(11, 13, 18, 0.85);
   }
   #edit-overlay.open { display: flex; opacity: 1; transform: scale(1); }
   #edit-overlay .edit-title { font-size: 13px; color: var(--muted); letter-spacing: 0.06em; text-transform: uppercase; }
@@ -100,6 +105,9 @@
   #palette-label { font-size: 12px; color: var(--muted); margin-right: 6px; }
   #edit-controls { display: flex; gap: 10px; }
   #edit-controls button { padding: 8px 20px; width: auto; }
+  /* Keep the overlay's interactive children stacked above the blurred canvas
+     regardless of how the browser resolves auto z-index. */
+  #net, #palette, #edit-controls, .edit-title { position: relative; z-index: 1; }
   .stats { font-size: 12px; color: var(--muted); line-height: 1.7; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
   .stats b { color: var(--text); font-weight: 500; }
   .badge { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 11px; font-weight: 600; }
@@ -554,17 +562,22 @@ function onStickerClick(e) {
 
 function buildPalette() {
   const p = document.getElementById('palette');
-  // Label already exists. Append 6 color buttons.
+  // Idempotent: clear any previous pigment buttons so this can be called more
+  // than once (eg. on every enterEditMode) without duplicating children.
+  for (const b of p.querySelectorAll('.pigment')) b.remove();
   for (let c = 0; c < 6; c++) {
     const b = document.createElement('button');
+    b.type = 'button';               // explicit: never acts as a form submit
     b.className = 'pigment' + (c === selectedBrush ? ' selected' : '');
     b.style.backgroundColor = '#' + COLORS[c].toString(16).padStart(6, '0');
     b.textContent = FACE_LETTERS[c];
-    b.dataset.color = c;
+    b.dataset.color = String(c);
     b.title = `${FACE_LETTERS[c]} 面颜色`;
     b.addEventListener('click', () => {
       selectedBrush = c;
-      for (const el of p.querySelectorAll('.pigment')) el.classList.toggle('selected', Number(el.dataset.color) === c);
+      for (const el of p.querySelectorAll('.pigment')) {
+        el.classList.toggle('selected', Number(el.dataset.color) === c);
+      }
     });
     p.appendChild(b);
   }
@@ -664,6 +677,7 @@ $('resetBtn').onclick = () => {
 
 function enterEditMode() {
   editMode = true;
+  buildPalette();   // defensive: ensures palette buttons exist and listeners are fresh
   render2DNet();
   document.getElementById('edit-overlay').classList.add('open');
   setStats('');
