@@ -9,6 +9,7 @@ dependencies = [
     "fastapi>=0.115",
     "uvicorn[standard]>=0.32",
     "pydantic>=2.9",
+    "kociemba>=1.2",   # C-backed two-phase algorithm; used alongside DeepCubeA
 ]
 
 [project.scripts]

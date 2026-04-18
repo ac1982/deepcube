@@ -110,47 +110,91 @@ def test_scramble_rejects_bad_depth(client: TestClient):
     assert r.status_code == 422
 
 
-def test_solve_without_model_returns_503(client_no_net: TestClient):
-    r = client_no_net.post("/solve", json={"state": SOLVED.tolist()})
+def test_solve_deepcube_without_model_returns_503(client_no_net: TestClient):
+    r = client_no_net.post("/solve", json={"state": SOLVED.tolist(), "solver": "deepcube"})
     assert r.status_code == 503
     assert "checkpoint" in r.json()["detail"].lower()
 
 
-def test_solve_trivial_already_solved(client_with_net: TestClient):
-    r = client_with_net.post("/solve", json={"state": SOLVED.tolist()})
+def test_solve_deepcube_trivial_already_solved(client_with_net: TestClient):
+    r = client_with_net.post("/solve", json={"state": SOLVED.tolist(), "solver": "deepcube"})
     assert r.status_code == 200
     body = r.json()
+    assert body["solver"] == "deepcube"
     assert body["solved"] is True
     assert body["moves"] == []
     assert body["path_length"] == 0
+    assert body["path_length_htm"] is None  # BWAS doesn't produce HTM
 
 
-def test_solve_one_move_scramble(client_with_net: TestClient):
+def test_solve_deepcube_one_move_scramble(client_with_net: TestClient):
     start = apply_move(SOLVED, MOVES.index("R"))
-    r = client_with_net.post("/solve", json={"state": start.tolist(), "batch_size": 64})
+    r = client_with_net.post("/solve", json={
+        "state": start.tolist(), "solver": "deepcube", "batch_size": 64,
+    })
     assert r.status_code == 200
     body = r.json()
     assert body["solved"] is True
     assert body["moves"] == ["R'"]
     assert body["path_length"] == 1
-    # Verify by replaying
     s = np.array(start, dtype=np.int8)
     for m in body["moves"]:
         s = apply_move(s, MOVES.index(m))
     assert np.array_equal(s, SOLVED)
 
 
-def test_solve_rejects_wrong_length_state(client_with_net: TestClient):
-    r = client_with_net.post("/solve", json={"state": [0] * 10})
+def test_solve_kociemba_works_without_model(client_no_net: TestClient):
+    """Kociemba path is independent of the trained net — should work even when
+    /healthz says model_loaded=false."""
+    start = apply_move(SOLVED, MOVES.index("R"))
+    r = client_no_net.post("/solve", json={"state": start.tolist(), "solver": "kociemba"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["solver"] == "kociemba"
+    assert body["solved"] is True
+    assert body["moves"] == ["R'"]
+    assert body["path_length"] == 1
+    assert body["path_length_htm"] == 1  # one HTM move
+
+
+def test_solve_kociemba_is_the_default(client_no_net: TestClient):
+    """Omitting `solver` should default to kociemba, which works without the net."""
+    start = apply_move(SOLVED, MOVES.index("U"))
+    r = client_no_net.post("/solve", json={"state": start.tolist()})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["solver"] == "kociemba"
+    assert body["solved"] is True
+
+
+def test_solve_kociemba_reports_htm_on_half_turn(client_no_net: TestClient):
+    """A U2 scramble (two quarter turns on the same face) is one HTM move
+    but two QTM moves; kociemba should report the difference."""
+    start = apply_move(apply_move(SOLVED, MOVES.index("U")), MOVES.index("U"))
+    r = client_no_net.post("/solve", json={"state": start.tolist(), "solver": "kociemba"})
+    body = r.json()
+    assert body["solved"] is True
+    assert body["path_length"] == 2         # two quarter-turns to undo U2
+    assert body["path_length_htm"] == 1     # counted as one HTM half-turn
+
+
+def test_solve_rejects_wrong_length_state(client_no_net: TestClient):
+    # Uses kociemba path (no net needed) but validation happens before dispatch.
+    r = client_no_net.post("/solve", json={"state": [0] * 10})
     assert r.status_code == 422
 
 
-def test_solve_rejects_out_of_range_values(client_with_net: TestClient):
+def test_solve_rejects_out_of_range_values(client_no_net: TestClient):
     bad = [0] * 54
     bad[0] = 9
-    r = client_with_net.post("/solve", json={"state": bad})
+    r = client_no_net.post("/solve", json={"state": bad})
     assert r.status_code == 400
     assert "0..5" in r.json()["detail"]
+
+
+def test_solve_rejects_unknown_solver(client_no_net: TestClient):
+    r = client_no_net.post("/solve", json={"state": SOLVED.tolist(), "solver": "magic"})
+    assert r.status_code == 422  # pydantic Literal rejection
 
 
 def test_root_missing_frontend_is_404(client: TestClient, monkeypatch: pytest.MonkeyPatch):

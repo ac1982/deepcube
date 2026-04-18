@@ -26,7 +26,7 @@ import os
 import threading
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Annotated, AsyncIterator
+from typing import Annotated, AsyncIterator, Literal
 
 import numpy as np
 import torch
@@ -48,6 +48,7 @@ from deepcube.cube3 import (
 )
 from deepcube.model import DeepCubeANet, load_checkpoint
 from deepcube.search import bwas_solve
+from deepcube.solver_kociemba import kociemba_solve
 
 __all__ = ["app", "main"]
 
@@ -78,6 +79,8 @@ class ScrambleResponse(BaseModel):
 
 class SolveRequest(BaseModel):
     state: State54
+    solver: Literal["deepcube", "kociemba"] = "kociemba"
+    # BWAS-only knobs; ignored for kociemba.
     lambda_weight: float = Field(default=2.0, ge=1.0, le=10.0)
     batch_size: int = Field(default=1000, ge=1, le=10_000)
     max_nodes: int = Field(default=1_000_000, ge=1_000, le=20_000_000)
@@ -85,9 +88,11 @@ class SolveRequest(BaseModel):
 
 
 class SolveResponse(BaseModel):
+    solver: str
     solved: bool
     moves: list[str]
-    path_length: int
+    path_length: int                 # quarter-turn count — always meaningful
+    path_length_htm: int | None      # half-turn count — only for kociemba
     nodes_expanded: int
     nodes_generated: int
     elapsed_sec: float
@@ -185,31 +190,38 @@ def post_scramble(req: ScrambleRequest) -> ScrambleResponse:
 
 @app.post("/solve", response_model=SolveResponse)
 def post_solve(req: SolveRequest) -> SolveResponse:
-    if _net is None:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="model not loaded — drop a trained checkpoint into checkpoints/deepcube_cube3.pt "
-                   "(or set DEEPCUBE_CHECKPOINT) and restart the server",
-        )
     state = np.array(req.state, dtype=np.int8)
     if state.shape != (N_STICKERS,):
         raise HTTPException(status_code=400, detail=f"state must be {N_STICKERS} ints")
     if state.min() < 0 or state.max() > 5:
         raise HTTPException(status_code=400, detail="state values must be in 0..5")
 
-    with _SOLVE_LOCK:
-        res = bwas_solve(
-            _net, state,
-            lambda_weight=req.lambda_weight,
-            batch_size=req.batch_size,
-            max_iterations=req.max_iterations,
-            max_nodes=req.max_nodes,
-            device="cpu",
-        )
+    if req.solver == "kociemba":
+        res = kociemba_solve(state)
+    else:
+        if _net is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="deepcube model not loaded — drop a trained checkpoint into "
+                       "checkpoints/deepcube_cube3.pt (or set DEEPCUBE_CHECKPOINT) and restart, "
+                       "or pass solver=\"kociemba\" to use the two-phase solver.",
+            )
+        with _SOLVE_LOCK:
+            res = bwas_solve(
+                _net, state,
+                lambda_weight=req.lambda_weight,
+                batch_size=req.batch_size,
+                max_iterations=req.max_iterations,
+                max_nodes=req.max_nodes,
+                device="cpu",
+            )
+
     return SolveResponse(
+        solver=req.solver,
         solved=res.solved,
         moves=[MOVES[i] for i in res.path],
         path_length=res.path_length,
+        path_length_htm=res.path_length_htm,
         nodes_expanded=res.nodes_expanded,
         nodes_generated=res.nodes_generated,
         elapsed_sec=res.elapsed_sec,

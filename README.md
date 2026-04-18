@@ -27,6 +27,11 @@ At each iteration:
 
 Solving (inference) uses **Batch-Weighted A\*** with `h_θ` as the heuristic.
 
+The UI also ships a second backend — **Kociemba's two-phase algorithm** (1992,
+the classical near-optimal cube solver) — so the app is useful before a trained
+checkpoint exists, and for side-by-side comparison after. See the solver radio
+in the Solve panel.
+
 ## Architecture
 
 Residual MLP (per paper):
@@ -113,7 +118,12 @@ checkpoint the server still boots — only `/solve` is disabled.
 | `/healthz` | GET | `{ok, model_loaded, checkpoint_path}` |
 | `/meta` | GET | cube constants (moves, MOVE_PERMS, solved state) used by the frontend |
 | `/scramble` | POST | `{depth, seed?}` → `{state, moves}` |
-| `/solve` | POST | `{state, lambda_weight?, batch_size?, ...}` → `{solved, moves, path_length, nodes_expanded, nodes_generated, elapsed_sec, stop_reason}` |
+| `/solve` | POST | `{state, solver?, lambda_weight?, batch_size?, ...}` → `{solver, solved, moves, path_length, path_length_htm, nodes_expanded, nodes_generated, elapsed_sec, stop_reason}` |
+
+`solver` is `"kociemba"` (default) or `"deepcube"`. Kociemba works without a
+trained checkpoint; DeepCubeA returns 503 until one is in place.
+`path_length` is always in the quarter-turn metric (QTM); `path_length_htm` is
+populated only by Kociemba.
 
 ## Project status
 
@@ -122,8 +132,9 @@ checkpoint the server still boots — only `/solve` is disabled.
 - [x] AVI training loop with AMP (bf16), `torch.compile`, checkpointing, resume
 - [x] Greedy-rollout sanity check
 - [x] Batch-Weighted A\* solver (`deepcube/search.py`, 19 tests)
-- [x] FastAPI backend (`deepcube/server.py`, 13 tests)
-- [x] three.js 3D frontend (`static/index.html`)
+- [x] Kociemba two-phase solver (`deepcube/solver_kociemba.py`, 30 tests)
+- [x] FastAPI backend (`deepcube/server.py`, 17 tests)
+- [x] three.js 3D frontend (`static/index.html`) with click-to-edit + solver selector
 
 ## Repo layout
 
@@ -137,10 +148,11 @@ checkpoint the server still boots — only `/solve` is disabled.
 │   ├── cube3.py            # env: 54-sticker state, 12 moves, scramble, one-hot
 │   ├── model.py            # DeepCubeANet, load_checkpoint
 │   ├── search.py           # Batch-Weighted A*
+│   ├── solver_kociemba.py  # Kociemba two-phase wrapper + state converter
 │   └── server.py           # FastAPI: /healthz, /meta, /scramble, /solve
 ├── static/
 │   └── index.html          # three.js 3D frontend
-├── tests/                  # pytest suite (80 cases)
+├── tests/                  # pytest suite (114 cases)
 ├── checkpoints/            # drop deepcube_cube3.pt here
 └── .gitignore
 ```

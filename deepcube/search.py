@@ -38,11 +38,12 @@ _SOLVED_BYTES = SOLVED.tobytes()
 class SolveResult:
     solved: bool
     path: list[int]
-    path_length: int
+    path_length: int   # quarter-turn metric (number of quarter turns)
     nodes_expanded: int
     nodes_generated: int
     elapsed_sec: float
     stop_reason: str  # "solved" | "empty_open" | "max_iterations" | "max_nodes"
+    path_length_htm: int | None = None   # half-turn metric count when meaningful (Kociemba)
 
     @property
     def path_names(self) -> list[str]:

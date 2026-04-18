@@ -45,6 +45,11 @@
   .hint.active { color: var(--warn); }
   .flash { animation: flash 0.4s ease-out; }
   @keyframes flash { 0% { background: rgba(232,93,93,0.4); } 100% { background: transparent; } }
+  .solver-choice { display: flex; flex-direction: column; gap: 6px; margin-bottom: 10px; }
+  .solver-opt { display: flex; gap: 8px; align-items: flex-start; font-size: 12px; line-height: 1.4; cursor: pointer; }
+  .solver-opt.disabled { opacity: 0.4; cursor: not-allowed; }
+  .solver-opt input[type=radio] { margin-top: 3px; accent-color: var(--accent); }
+  .solver-opt code { background: var(--bg); padding: 1px 4px; border-radius: 3px; font-size: 11px; }
   .stats { font-size: 12px; color: var(--muted); line-height: 1.7; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
   .stats b { color: var(--text); font-weight: 500; }
   .badge { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 11px; font-weight: 600; }
@@ -88,7 +93,17 @@
 
     <section>
       <h2>Solve</h2>
-      <label>
+      <div class="solver-choice">
+        <label class="solver-opt">
+          <input type="radio" name="solver" value="kociemba" checked />
+          <span><b>Kociemba</b> — two-phase, ms-fast, optimal in HTM</span>
+        </label>
+        <label class="solver-opt" id="deepcubeOpt">
+          <input type="radio" name="solver" value="deepcube" />
+          <span><b>DeepCubeA</b> — learned heuristic + A<sup>*</sup>, needs a trained <code>.pt</code></span>
+        </label>
+      </div>
+      <label id="lambdaRow" style="display:none;">
         <span style="width: 60px;">λ</span>
         <input type="range" id="lambda" min="1" max="5" step="0.5" value="2" />
         <span id="lambdaVal" style="font-family: ui-monospace, monospace; font-size: 12px;">2.0</span>
@@ -307,15 +322,30 @@ depthNum.oninput = () => depthSlider.value = depthNum.value;
 const lambdaSlider = $('lambda'), lambdaVal = $('lambdaVal');
 lambdaSlider.oninput = () => lambdaVal.textContent = parseFloat(lambdaSlider.value).toFixed(1);
 
+// Keep the solver radio in sync with button enable/disable state.
+for (const radio of document.querySelectorAll('input[name="solver"]')) {
+  radio.addEventListener('change', updateButtons);
+}
+
+function selectedSolver() {
+  return document.querySelector('input[name="solver"]:checked').value;
+}
+
 function updateButtons() {
+  const solver = selectedSolver();
+  const solveOk = solver === 'kociemba' || modelLoaded;
   $('scrambleBtn').disabled = busy || editMode;
-  $('solveBtn').disabled   = busy || editMode || !modelLoaded;
+  $('solveBtn').disabled   = busy || editMode || !solveOk;
   $('resetBtn').disabled   = busy || editMode;
   $('editBtn').disabled    = busy;
   $('editBtn').textContent = editMode ? 'Exit edit mode' : 'Edit mode — match physical cube';
   $('editBtn').classList.toggle('editing', editMode);
   document.getElementById('canvas-wrap').classList.toggle('editing', editMode);
   $('editHint').classList.toggle('active', editMode);
+  // Only show the lambda slider when DeepCubeA is selected.
+  $('lambdaRow').style.display = solver === 'deepcube' ? 'flex' : 'none';
+  // Grey out the DeepCubeA radio label when no model is loaded.
+  $('deepcubeOpt').classList.toggle('disabled', !modelLoaded);
 }
 function setBusy(b) { busy = b; updateButtons(); }
 function setStats(html) { $('solveStats').innerHTML = html; }
@@ -496,9 +526,14 @@ $('solveBtn').onclick = async () => {
     setStats(`<span style="color: var(--bad)">invalid state — ${err}</span>`);
     return;
   }
-  setBusy(true); setStats('solving…'); setMoves('');
+  const solver = selectedSolver();
+  setBusy(true); setStats(`solving with ${solver}…`); setMoves('');
   try {
-    const body = { state: Array.from(state), lambda_weight: parseFloat(lambdaSlider.value) };
+    const body = {
+      state: Array.from(state),
+      solver,
+      lambda_weight: parseFloat(lambdaSlider.value),
+    };
     const resp = await fetch('/solve', {
       method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body),
     });
@@ -510,14 +545,17 @@ $('solveBtn').onclick = async () => {
     if (r.solved) {
       await animateSequence(r.moves, 160);
       for (const m of r.moves) state = applyPerm(state, movePerms[moveNameToIdx[m]]);
+      const htm = r.path_length_htm != null ? ` / ${r.path_length_htm} HTM` : '';
+      const nodes = (r.solver === 'deepcube')
+        ? ` · ${r.nodes_expanded.toLocaleString()} expanded · ${r.nodes_generated.toLocaleString()} generated`
+        : '';
       setStats(
-        `<b>solved</b> in ${r.path_length} moves · ${r.nodes_expanded.toLocaleString()} expanded · ` +
-        `${r.nodes_generated.toLocaleString()} generated · ${r.elapsed_sec.toFixed(2)}s`
+        `<b>${r.solver}</b> solved in ${r.path_length} QTM${htm}${nodes} · ${r.elapsed_sec.toFixed(3)}s`
       );
       setMoves(r.moves.join(' '));
     } else {
-      setStats(`<span style="color: var(--warn)">stopped: ${r.stop_reason} after ` +
-               `${r.nodes_expanded.toLocaleString()} expanded · ${r.elapsed_sec.toFixed(2)}s</span>`);
+      setStats(`<span style="color: var(--warn)">${r.solver} stopped: ${r.stop_reason}` +
+               ` · ${r.elapsed_sec.toFixed(3)}s</span>`);
     }
   } catch (e) {
     setStats(`<span style="color: var(--bad)">solve failed: ${e.message}</span>`);
