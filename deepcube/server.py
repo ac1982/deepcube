@@ -87,6 +87,21 @@ class SolveRequest(BaseModel):
     max_iterations: int = Field(default=2_000, ge=1, le=100_000)
 
 
+class CompareEntry(BaseModel):
+    """The *other* solver's result on the same state, included in SolveResponse
+    when the primary solver is DeepCubeA so the UI can show a side-by-side
+    comparison. Kociemba is always cheap (ms), so we always run it as the
+    compare baseline. DeepCubeA is slow (up to ~minute) — we only include it
+    as compare if a model is loaded; otherwise this field is None."""
+    solver: str
+    solved: bool
+    moves: list[str]                 # full path, so UI can fall back to it when primary fails
+    path_length: int
+    path_length_htm: int | None
+    elapsed_sec: float
+    stop_reason: str
+
+
 class SolveResponse(BaseModel):
     solver: str
     solved: bool
@@ -97,6 +112,7 @@ class SolveResponse(BaseModel):
     nodes_generated: int
     elapsed_sec: float
     stop_reason: str
+    compare: CompareEntry | None = None
 
 
 class HealthResponse(BaseModel):
@@ -196,6 +212,8 @@ def post_solve(req: SolveRequest) -> SolveResponse:
     if state.min() < 0 or state.max() > 5:
         raise HTTPException(status_code=400, detail="state values must be in 0..5")
 
+    compare: CompareEntry | None = None
+
     if req.solver == "kociemba":
         res = kociemba_solve(state)
     else:
@@ -215,6 +233,18 @@ def post_solve(req: SolveRequest) -> SolveResponse:
                 max_nodes=req.max_nodes,
                 device="cpu",
             )
+        # Always also run Kociemba for the comparison card. It's a few
+        # milliseconds, so no meaningful latency cost.
+        k_res = kociemba_solve(state)
+        compare = CompareEntry(
+            solver="kociemba",
+            solved=k_res.solved,
+            moves=[MOVES[i] for i in k_res.path],
+            path_length=k_res.path_length,
+            path_length_htm=k_res.path_length_htm,
+            elapsed_sec=k_res.elapsed_sec,
+            stop_reason=k_res.stop_reason,
+        )
 
     return SolveResponse(
         solver=req.solver,
@@ -226,6 +256,7 @@ def post_solve(req: SolveRequest) -> SolveResponse:
         nodes_generated=res.nodes_generated,
         elapsed_sec=res.elapsed_sec,
         stop_reason=res.stop_reason,
+        compare=compare,
     )
 
 

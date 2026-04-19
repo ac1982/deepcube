@@ -167,6 +167,36 @@ def test_solve_kociemba_is_the_default(client_no_net: TestClient):
     assert body["solved"] is True
 
 
+def test_solve_kociemba_has_no_compare_field(client_no_net: TestClient):
+    """Picking Kociemba should NOT also run DeepCubeA — DeepCubeA is slow
+    and the whole point of compare is to show AI *vs* classical when the
+    user specifically asked for AI."""
+    r = client_no_net.post("/solve", json={"state": SOLVED.tolist(), "solver": "kociemba"})
+    body = r.json()
+    assert body["compare"] is None
+
+
+def test_solve_deepcube_includes_kociemba_compare(client_with_net: TestClient):
+    """When the user picks DeepCubeA, the response must include a Kociemba
+    result on the same state, so the UI can render the comparison card."""
+    start = apply_move(SOLVED, MOVES.index("U"))
+    r = client_with_net.post("/solve", json={
+        "state": start.tolist(), "solver": "deepcube", "batch_size": 64,
+    })
+    body = r.json()
+    assert body["solver"] == "deepcube"
+    assert body["compare"] is not None
+    c = body["compare"]
+    assert c["solver"] == "kociemba"
+    assert c["solved"] is True
+    assert c["path_length"] == 1
+    assert c["path_length_htm"] == 1
+    assert c["moves"] == ["U'"]
+    # The compare result should not depend on the DeepCubeA primary having
+    # succeeded — it's an independent run.
+    assert c["elapsed_sec"] >= 0
+
+
 def test_solve_kociemba_reports_htm_on_half_turn(client_no_net: TestClient):
     """A U2 scramble (two quarter turns on the same face) is one HTM move
     but two QTM moves; kociemba should report the difference."""

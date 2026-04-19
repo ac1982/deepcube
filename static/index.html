@@ -118,6 +118,32 @@
     font-weight: 700; font-size: 13px;
     border: 1px solid rgba(0,0,0,0.25);
   }
+  /* Comparison card: two rows of solver | steps | time, plus a verdict line */
+  .compare {
+    margin-top: 10px; border: 1px solid var(--border); border-radius: 8px;
+    background: var(--bg); overflow: hidden; font-size: 12px;
+  }
+  .compare-row {
+    display: grid; grid-template-columns: 22px 1fr auto auto; gap: 10px;
+    align-items: baseline; padding: 8px 10px; border-bottom: 1px solid var(--border);
+  }
+  .compare-row:last-of-type { border-bottom: 0; }
+  .compare-row.primary { background: rgba(94,174,255,0.07); }
+  .compare-row.primary .marker { color: var(--accent); font-size: 11px; }
+  .compare-row .solver-name { font-weight: 600; color: var(--text); }
+  .compare-row .solver-name small { color: var(--muted); font-weight: 400; margin-left: 5px; }
+  .compare-row .length { font-family: ui-monospace, Menlo, monospace; color: var(--text); }
+  .compare-row .length sub { color: var(--muted); font-size: 10px; margin-left: 4px; }
+  .compare-row .length.unsolved { color: var(--warn); }
+  .compare-row .time { font-family: ui-monospace, Menlo, monospace; color: var(--muted); font-size: 11px; }
+  .compare-verdict {
+    padding: 7px 10px; background: #10141c; color: var(--text);
+    font-size: 12px; line-height: 1.5; border-top: 1px solid var(--border);
+  }
+  .compare-verdict b.win  { color: var(--good); }
+  .compare-verdict b.lose { color: var(--warn); }
+  .compare-verdict .sub   { color: var(--muted); font-size: 11px; display: block; margin-top: 3px; }
+
   .moves code.htm {
     color: var(--text); font-size: 13px; line-height: 1.8; letter-spacing: 0.01em;
   }
@@ -502,6 +528,62 @@ function inverseHtm(tok) {
   return tok + "'";                                   // X  -> X'
 }
 
+function fmtTime(sec) {
+  if (sec < 0.01) return `${(sec * 1000).toFixed(0)}ms`;
+  if (sec < 1)    return `${(sec * 1000).toFixed(0)}ms`;
+  if (sec < 60)   return `${sec.toFixed(2)}s`;
+  const m = Math.floor(sec / 60), s = Math.round(sec - m * 60);
+  return `${m}m${s}s`;
+}
+
+// Solver display names. Kept human-friendly; "AI" tag helps the verdict read naturally.
+const SOLVER_LABEL = {
+  deepcube: { name: 'DeepCubeA', short: 'AI' },
+  kociemba: { name: 'Kociemba', short: 'Kociemba' },
+};
+
+function solverRow({ solver, solved, length, htm, elapsedSec, isPrimary }) {
+  const label = SOLVER_LABEL[solver] || { name: solver, short: solver };
+  const marker = isPrimary ? '<span class="marker">▶</span>' : '<span class="marker"></span>';
+  const note = isPrimary ? '<small>动画中</small>' : '';
+  const lengthHtml = solved
+    ? `<span class="length">${length} QTM${htm != null ? ` <sub>${htm} HTM</sub>` : ''}</span>`
+    : `<span class="length unsolved">未解</span>`;
+  return `<div class="compare-row ${isPrimary ? 'primary' : ''}">
+    ${marker}
+    <span class="solver-name">${label.name}${note}</span>
+    ${lengthHtml}
+    <span class="time">${fmtTime(elapsedSec)}</span>
+  </div>`;
+}
+
+function verdictLine(primary, compare) {
+  // Both solved → compare QTM. Tell the user who was shorter (or equal).
+  if (primary.solved && compare.solved) {
+    const diff = primary.length - compare.length;
+    const pLabel = SOLVER_LABEL[primary.solver]?.short || primary.solver;
+    const cLabel = SOLVER_LABEL[compare.solver]?.short || compare.solver;
+    if (diff < 0) {
+      return `<b class="win">${pLabel} 路径比 ${cLabel} 短 ${-diff} 步</b>（QTM）`
+        + `<span class="sub">AI 学到了一个能找到更短路径的启发式，代价是搜索耗时更长。</span>`;
+    }
+    if (diff > 0) {
+      return `<b class="lose">${cLabel} 比 ${pLabel} 短 ${diff} 步</b>（QTM）`
+        + `<span class="sub">AI 这次没找到更优解。BWAS 的搜索预算（max_nodes, λ）可能影响结果。</span>`;
+    }
+    return `<b>两者步数相同</b>（${primary.length} QTM）`;
+  }
+  // Primary failed but compare solved → we will animate compare's path.
+  if (!primary.solved && compare.solved) {
+    const pLabel = SOLVER_LABEL[primary.solver]?.short || primary.solver;
+    const cLabel = SOLVER_LABEL[compare.solver]?.short || compare.solver;
+    return `<b class="lose">${pLabel} 在预算内未找到解（${primary.stop_reason}）</b>`
+      + `<span class="sub">已用 ${cLabel} 的 ${compare.length} 步方案继续动画。</span>`;
+  }
+  if (primary.solved && !compare.solved) return '';
+  return `<b class="lose">两个 solver 都未解出</b>`;
+}
+
 // ---- DOM wiring ----
 const $ = (id) => document.getElementById(id);
 
@@ -876,26 +958,64 @@ $('solveBtn').onclick = async () => {
       throw new Error(err.detail || `HTTP ${resp.status}`);
     }
     const r = await resp.json();
-    if (r.solved) {
-      const htm = qtmToHtm(r.moves);
+
+    // Decide which path to animate: primary if it solved, else fall back to compare if it solved.
+    const c = r.compare;  // may be null (kociemba primary) or object (deepcube primary)
+    const primaryOK = r.solved;
+    const compareOK = c && c.solved;
+    const playMoves = primaryOK ? r.moves : (compareOK ? c.moves : null);
+    const animatedSolver = primaryOK ? r.solver : (compareOK ? c.solver : null);
+
+    if (playMoves) {
+      const htm = qtmToHtm(playMoves);
+      // currentSolve is built from whichever path we're actually going to animate.
+      const animLen = playMoves.length;
       currentSolve = {
-        qtm: r.moves, htm, htmIdx: 0,
-        solver: r.solver,
-        pathLenQtm: r.path_length,
-        pathLenHtm: r.path_length_htm != null ? r.path_length_htm : htm.length,
-        elapsedSec: r.elapsed_sec,
+        qtm: playMoves, htm, htmIdx: 0,
+        solver: animatedSolver,
+        pathLenQtm: animLen,
+        pathLenHtm: (primaryOK ? r.path_length_htm : (compareOK ? c.path_length_htm : null)) ?? htm.length,
+        elapsedSec: primaryOK ? r.elapsed_sec : c.elapsed_sec,
       };
-      const htmLabel = r.path_length_htm != null ? ` / ${r.path_length_htm} HTM` : ` / ${htm.length} HTM`;
-      const nodes = (r.solver === 'deepcube')
+
+      // Build the two-row comparison card when we have a compare partner.
+      let comparisonBlock = '';
+      if (c) {
+        // The primary row always reflects what the user picked, even if it failed.
+        const primaryRow = solverRow({
+          solver: r.solver, solved: r.solved,
+          length: r.path_length,
+          htm: r.path_length_htm,
+          elapsedSec: r.elapsed_sec,
+          isPrimary: animatedSolver === r.solver,
+        });
+        const compareRow = solverRow({
+          solver: c.solver, solved: c.solved,
+          length: c.path_length,
+          htm: c.path_length_htm,
+          elapsedSec: c.elapsed_sec,
+          isPrimary: animatedSolver === c.solver,
+        });
+        const primarySummary = { solver: r.solver, solved: r.solved, length: r.path_length, stop_reason: r.stop_reason };
+        const compareSummary = { solver: c.solver, solved: c.solved, length: c.path_length, stop_reason: c.stop_reason };
+        const verdict = verdictLine(primarySummary, compareSummary);
+        comparisonBlock =
+          `<div class="compare">${primaryRow}${compareRow}` +
+          (verdict ? `<div class="compare-verdict">${verdict}</div>` : '') +
+          `</div>`;
+      }
+
+      const nodes = (r.solver === 'deepcube' && r.solved)
         ? ` · 展开 ${r.nodes_expanded.toLocaleString()} · 生成 ${r.nodes_generated.toLocaleString()}`
         : '';
-      setStats(
-        `<b>${r.solver}</b> 找到 ${r.path_length} QTM${htmLabel} 路径${nodes} · ${r.elapsed_sec.toFixed(3)}s<br>` +
-        `点 <b>下一步</b> 开始逐步还原（可跟着你手里的魔方拧）`
-      );
+      const header = c
+        ? `点 <b>下一步</b> 开始逐步还原（可跟着你手里的魔方拧）${nodes}`
+        : `<b>${r.solver}</b> 找到 ${r.path_length} QTM${r.path_length_htm != null ? ` / ${r.path_length_htm} HTM` : ''} 路径 · ${r.elapsed_sec.toFixed(3)}s<br>点 <b>下一步</b> 开始逐步还原`;
+      setStats(header + comparisonBlock);
       renderSolution();
       return;   // skip the busy-off in finally — renderSolution already called updateButtons
     } else {
+      // Neither primary nor compare solved — just a single failure line.
       setStats(`<span style="color: var(--warn)">${r.solver} 停止：${r.stop_reason}` +
                ` · ${r.elapsed_sec.toFixed(3)}s</span>`);
     }
