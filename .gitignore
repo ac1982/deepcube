@@ -17,6 +17,11 @@ checkpoints/*.pth
 ckpt_*.pt
 deepcube_cube3.pt
 
+# Secrets
+.env
+.env.*
+!.env.example
+
 # Editor / OS
 .DS_Store
 .vscode/
